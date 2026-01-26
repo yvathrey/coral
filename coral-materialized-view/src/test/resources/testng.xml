@@ -1,0 +1,13 @@
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd" >
+<!--
+    Copyright 2026 LinkedIn Corporation. All rights reserved.
+    Licensed under the BSD-2 Clause license.
+    See LICENSE in the project root for license information.
+-->
+<suite name="MaterializedViewOptimizerTestSuite" verbose="1">
+  <test name="MaterializedViewTests">
+    <classes>
+      <class name="com.linkedin.coral.materializedview.MaterializedViewOptimizerTest"/>
+    </classes>
+  </test>
+</suite>

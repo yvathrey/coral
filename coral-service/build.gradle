@@ -26,6 +26,7 @@ dependencies {
   implementation project(':coral-common')
   implementation project(':coral-hive')
   implementation project(':coral-incremental')
+  implementation project(':coral-materialized-view')
   implementation project(':coral-trino')
   implementation project(':coral-spark')
   implementation project(':coral-visualization')
