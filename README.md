@@ -1,296 +1,256 @@
-# Coral Materialized View Optimizer
+# Coral
 
-**Intelligent materialized view creation and query rewriting for Hive/Spark workloads**
+[![CI](https://github.com/linkedin/coral/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/linkedin/coral/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/linkedin/coral?include_prereleases)](https://github.com/linkedin/coral/releases)
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Test Coverage](https://img.shields.io/badge/tests-31%2F32%20passing-green)]()
-[![Version](https://img.shields.io/badge/version-2.2.60-blue)]()
+<p align="center">
+ <img src="docs/coral-logo.jpg" width="400" title="Coral Logo">
+</p>
 
----
+**Coral** is a SQL translation, analysis, and rewrite engine. It establishes a standard intermediate representation, 
+Coral IR, which captures the semantics of relational algebraic expressions independently of any SQL dialect. Coral IR
+is defined in two forms: one is the at the abstract syntax tree (AST) layer, and the other is at the logical plan layer.
+Both forms are isomorphic and convertible to each other.
 
-## 🚀 What's New (Latest Release)
+Coral exposes APIs for implementing conversions between SQL dialects and Coral IR in both directions.
+Currently, Coral supports converting HiveQL and Spark SQL to Coral IR, and converting Coral IR to HiveQL, Spark SQL,
+and Trino SQL. With multiple SQL dialects supported, Coral can be used to translate SQL statements and views defined in
+one dialect to equivalent ones in another dialect. It can also be used to interoperate between engines and SQL-powered 
+data sources. For dialect conversion examples, see the modules [coral-hive](coral-hive), [coral-spark](coral-spark), 
+and [coral-trino](coral-trino).
 
-### Version 2.2.60 - Column Alias + Join Order Optimization
+Coral also exposes APIs for Coral IR rewrite and manipulation. This includes rewriting Coral IR expressions to produce
+semantically equivalent, but more performant expressions. For example, Coral automates
+incremental view maintenance by rewriting a view definition to an incremental one. See the module [coral-incremental](coral-incremental)
+for more details. Other Coral rewrite applications include data governance and policy enforcement.
 
-**Shipped**: 2026-01-26
+Coral can be used as a library in other projects, or as a service. See instructions below for more details.
 
-**Features**:
-1. ✅ **Column Alias Support** - Queries with different aliases share same MV
-2. ✅ **Join Order Normalization** - `A JOIN B` = `B JOIN A` for INNER joins
+## <img src="https://user-images.githubusercontent.com/10084105/141652009-eeacfab4-0e7b-4320-9379-6c3f8641fcf1.png" width="30" title="Slack Logo"> Slack
 
-**Results**:
-- Up to 75% reduction in redundant MVs
-- Zero breaking changes
-- < 1% performance overhead
-- 31/32 tests passing (96.9%)
+- Join the discussion with the community on Slack [here](https://join.slack.com/t/coral-sql/shared_invite/zt-s8te92up-qU5PSG~spK33ovPPL5v96A)!
 
-**Quick Example**:
-```sql
--- Before: These created 3 separate MVs
-SELECT country, COUNT(*) as cnt FROM A JOIN B GROUP BY country
-SELECT country, COUNT(*) as total FROM B JOIN A GROUP BY country
-SELECT country, COUNT(*) FROM A JOIN B WHERE x > 100 GROUP BY country
+## Modules
 
--- After: All share 1 MV! 🎉
-```
+**Coral** consists of following modules:
 
----
+- Coral-Hive: Converts HiveQL to Coral IR (can be typically used with Spark SQL as well).
+- Coral-Trino: Converts Coral IR to Trino SQL. Converting Trino SQL to Coral IR is WIP.
+- Coral-Spark: Converts Coral IR to Spark SQL (can be typically used with HiveQL as well).
+- Coral-Dbt: Integrates Coral with DBT. It enables applying Coral transformations on DBT models.
+- Coral-Incremental: Derives an incremental query from input SQL for incremental view maintenance.
+- Coral-Schema: Derives Avro schema of view using view logical plan and input Avro schemas of base tables.
+- Coral-Spark-Plan [WIP]: Converts Spark plan strings to equivalent logical plan.
+- Coral-Visualization: Visualizes Coral SqlNode and RelNode trees and renders them to an output file.
+- Coral-Service: Service that exposes REST APIs that allow users to interact with Coral (see [Coral-as-a-Service](#Coral-as-a-Service) for more details).
 
-## 📚 Documentation
+## Version Upgrades
 
-### 🎯 Start Here
-- **[DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)** - Complete documentation guide
+This project adheres to semantic versioning, where the format x.y.z represents major, minor, and patch version upgrades. Consideration should be given to potential changes required when integrating different versions of this project.
 
-### 📖 Core Docs
-1. **[FINAL_DEPLOYMENT_SUMMARY.md](FINAL_DEPLOYMENT_SUMMARY.md)** - Latest features overview
-2. **[TECHNICAL_FLOW_END_TO_END.md](TECHNICAL_FLOW_END_TO_END.md)** - How it works (Stage 1 & 2)
-3. **[SNOWFLAKE_COMPARISON.md](SNOWFLAKE_COMPARISON.md)** - Industry comparison
+**Major version Upgrade**
 
-### 🔧 Feature Docs
-- [COLUMN_ALIAS_PRODUCTION_READY.md](COLUMN_ALIAS_PRODUCTION_READY.md) - Column alias feature
-- [JOIN_ORDER_NORMALIZATION_SUMMARY.md](JOIN_ORDER_NORMALIZATION_SUMMARY.md) - Join order feature
-- [DISTINCT_LIMITATION.md](DISTINCT_LIMITATION.md) - Known limitation (DISTINCT on JOINs)
+A major version upgrade represents a version change that introduces backward incompatibility by removal or renaming of classes.
 
-### 📋 Reference
-- [API_QUICK_REFERENCE.md](API_QUICK_REFERENCE.md) - API documentation
-- [UNSUPPORTED_CASES_AND_LIMITATIONS.md](UNSUPPORTED_CASES_AND_LIMITATIONS.md) - Complete limitations
+**Minor version Upgrade**
 
----
+A minor version upgrade represents a version change that introduces backward incompatibility by removal or renaming of methods.
 
-## 🎯 Quick Start
+Please carefully review the release notes and documentation accompanying each version upgrade to understand the specific changes and the recommended steps for migration.
 
-### Prerequisites
-- Java 8
-- Gradle
-- Port 8080 available
 
-### Build & Run
+## How to Build
+
+Clone the repository:
 
 ```bash
-# Set Java 8
-export JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
-
-# Build
-./gradlew :coral-materialized-view:build -x spotlessJava -x spotlessCheck
-./gradlew :coral-service:build -x spotlessJava -x spotlessCheck -x test
-
-# Start service
-./gradlew :coral-service:bootRun --args='--spring.profiles.active=localMetastore' &
-
-# Wait for startup
-sleep 30
-
-# Verify
-curl http://localhost:8080/api/materialized-views/registry
+git clone https://github.com/linkedin/coral.git
 ```
 
-### Run Tests
+Build:
+
+**Please note that this project requires Python 3 and Java 8 to run.** Set `JAVA_HOME` to the home of an appropriate version and then use:
 
 ```bash
-# Unit tests
-./gradlew :coral-materialized-view:test --tests MaterializedViewOptimizerTest
-
-# Integration tests - Column Alias
-bash /tmp/test_alias_support_final.sh
-
-# Integration tests - Join Order
-bash /tmp/test_join_order_normalization.sh
-
-# Regression tests
-bash test-mv-optimization.sh
+./gradlew clean build
+```
+or, set the `org.gradle.java.home` gradle property to the Java home of an appropriate version as below:
+```bash
+./gradlew -Dorg.gradle.java.home=/path/to/java/home clean build
 ```
 
----
+## Contributing
 
-## 🎬 Demo
+The project is under active development and we welcome contributions of different forms.
+Please see the [Contribution Agreement](CONTRIBUTING.md).
 
-### API Example: Both Features Together
+## Resources
+
+- [Coral: A SQL translation, analysis, and rewrite engine for modern data lakehouses](https://engineering.linkedin.com/blog/2020/coral), LinkedIn Engineering Blog, 12/10/2020.
+- [Incremental View Maintenance with Coral, DBT, and Iceberg](https://www.slideshare.net/walaa_eldin_moustafa/incremental-view-maintenance-with-coral-dbt-and-iceberg), Tech Talk, Iceberg Meetup, 5/11/2023.
+- [Coral & Transport UDFs: Building Blocks of a Postmodern Data Warehouse](https://www.slideshare.net/walaa_eldin_moustafa/coral-transport-udfs-building-blocks-of-a-postmodern-data-warehouse-229545076), Tech-talk, Facebook HQ, 2/28/2020.
+- [Transport: Towards Logical Independence Using Translatable Portable UDFs](https://engineering.linkedin.com/blog/2018/11/using-translatable-portable-UDFs), LinkedIn Engineering Blog, 11/14/2018.
+- [Dali Views: Functions as a Service for Big Data](https://engineering.linkedin.com/blog/2017/11/dali-views--functions-as-a-service-for-big-data), LinkedIn Engineering Blog, 11/9/2017.
+
+
+## Coral-as-a-Service
+
+**Coral-as-a-Service** or simply, **Coral Service** is a service that exposes REST APIs that allow users to interact with Coral without necessarily coming from a compute engine. Currently, the service supports an API for query translation between different dialects and another for interacting with a local Hive Metastore to create example databases, tables, and views so they can be referenced in the translation API. The service can be used in two modes: remote Hive Metastore mode, and local Hive Metastore mode. The remote mode uses an existing (already deployed) Hive Metastore to resolve tables and views, while the local one creates an empty embedded Hive Metastore so users can add their own table and view definitions.
+
+### API Reference
+
+#### /api/translations/translate
+A **POST** API which takes JSON request body containing following parameters and returns the translated query:
+- `sourceLanguage`: Input dialect (e.g., spark, trino, hive -- see below for supported inputs)
+- `targetLanguage`: Output dialect (e.g., spark, trino, hive -- see below for supported outputs)
+- `query`: SQL query to translate between two dialects
+- [Optional] `rewriteType`: Type of Coral IR rewrite (e.g, incremental)
+
+#### /api/catalog-ops/execute
+A **POST** API which takes a SQL statement to create a database/table/view in the local metastore
+(note: this endpoint is only available with Coral Service in local metastore mode).
+
+### Instructions to use with examples
+1. Clone [Coral repo](https://github.com/linkedin/coral)
+```bash  
+git clone https://github.com/linkedin/coral.git  
+```
+2. From the root directory of Coral, access the coral-service module
+```bash  
+cd coral-service  
+```
+3. Build
+```bash  
+../gradlew clean build  
+```
+#### To run Coral Service using the **local metastore**:
+4. Run
+```bash  
+../gradlew bootRun --args='--spring.profiles.active=localMetastore'  
+```
+
+#### To run Coral Service using the **remote metastore**:
+4. Add your kerberos client keytab file to `coral-service/src/main/resources`
+5. Appropriately replace all instances of `SET_ME` in `coral-service/src/main/resources/hive.properties`
+6. Run
+```  
+../gradlew bootRun  
+```
+You can also specify a custom location of `hive.properties` file through `--hivePropsLocation` as follows
+```
+ ./gradlew bootRun --args='--hivePropsLocation=/tmp/hive.properties'
+```
+Then you can interact with the service using your [browser](#coral-service-ui) or the [CLI](#coral-service-cli).
+
+### Coral Service UI
+After running `../gradlew bootRun --args='--spring.profiles.active=localMetastore'` (for local metastore mode) 
+or `../gradlew bootRun` (for remote metastore mode) from coral-service module, configure and start the UI. 
+
+Please note: The backend service runs on port 8080 (by default) and the web UI runs on port 3000 (by default). 
+
+#### To configure environment variables:
+1. Create a `.env.local` file in the frontend project's root directory
+2. Copy over the template from `.env.local.example` into the new `.env.local` file
+3. Fill in the environment variable values in `.env.local`
+
+#### Install the required packages in the frontend directory:
 
 ```bash
-# Create database and tables
-curl -X POST http://localhost:8080/api/catalog-ops/execute \
-  -H "Content-Type: application/json" \
-  -d "CREATE DATABASE IF NOT EXISTS db1"
-
-curl -X POST http://localhost:8080/api/catalog-ops/execute \
-  -H "Content-Type: application/json" \
-  -d "CREATE TABLE IF NOT EXISTS db1.A(id int, country string, area_code int)"
-
-curl -X POST http://localhost:8080/api/catalog-ops/execute \
-  -H "Content-Type: application/json" \
-  -d "CREATE TABLE IF NOT EXISTS db1.B(id int, country string, area_code int)"
-
-# Analyze queries (shows both features working)
-curl -X POST http://localhost:8080/api/materialized-views/analyze \
-  -H "Content-Type: application/json" \
-  -d '{
-    "queries": [
-      "SELECT A.country, COUNT(*) as cnt FROM db1.A JOIN db1.B ON A.id = B.id GROUP BY A.country",
-      "SELECT B.country, COUNT(*) as total FROM db1.B JOIN db1.A ON B.id = A.id GROUP BY B.country",
-      "SELECT A.country, COUNT(*) FROM db1.A JOIN db1.B ON A.id = B.id WHERE A.area_code > 100 GROUP BY A.country"
-    ],
-    "minOccurrences": 2
-  }' | jq
-
-# Expected output: 1 MV created for all 3 queries!
-# - Different aliases: cnt, total, (none) ✅
-# - Different join orders: A JOIN B, B JOIN A ✅
-# - Different filters: area_code > 100, (none) ✅
+npm install
 ```
 
----
-
-## 🏗️ Architecture
-
-### Two-Stage System
-
+#### Now you can start the Coral Service UI by running:
+```bash  
+npm run dev
 ```
-Stage 1: Pattern Detection & MV Creation
-- Input: Multiple SQL queries
-- Process: Find common patterns with normalization
-- Output: Materialized view definitions
+Once compiled, the UI can be accessed from the browser at http://localhost:3000.
+<p align="center">
+ <img src="docs/coral-service-ui/start.png" title="Coral Service UI">
+</p>
+The UI provides 3 features:
 
-Stage 2: Query Rewriting
-- Input: Single SQL query + available MVs
-- Process: Match patterns and substitute with MVs
-- Output: Rewritten query using MVs
+#### Create a database/table/view in local metastore mode
+This feature is only available with Coral Service in local metastore mode, it calls `/api/catalog-ops/execute` API above.
+
+You can enter a SQL statement to create a database/table/view in the local metastore.
+<p align="center">
+ <img src="docs/coral-service-ui/creation.png" title="Coral Service Creation Feature">
+</p>
+
+#### Translate SQL from source language to target language (with rewrites)
+This feature is available with Coral Service in both local and remote metastore modes, it calls `/api/translations/translate` API above.
+
+You can enter a SQL query and specify the source and target language to use Coral translation service. You can also 
+specify the rewrite type to apply on the input query.
+<p align="center">
+ <img src="docs/coral-service-ui/translation.png" title="Coral Service Translation Feature">
+</p>
+
+#### Generate graphviz visualizations of Coral intermediate representations
+During translation, graphs of the Coral intermediate representations
+will also be generated and shown on screen. This will also include any post-rewrite nodes.
+<p align="center">
+ <img src="docs/coral-service-ui/graphs.png" title="Coral Service Translation Feature">
+</p>
+
+#### Developing on the frontend code
+
+#### To lint/format your code:
+```bash  
+npm run lint:fix
+npm run format
 ```
+### Coral Service CLI
+Apart from the UI above, you can also interact with the service using the CLI.
 
-### Key Optimizations
+Example workflow for local metastore mode:
 
-**1. Filter-Agnostic Matching**
-```sql
--- These share one MV (filters stripped from pattern):
-SELECT * FROM A JOIN B WHERE x > 100 GROUP BY country
-SELECT * FROM A JOIN B WHERE y = 'US' GROUP BY country
-```
-
-**2. Join Order Normalization** ⭐
-```sql
--- These share one MV (join order normalized):
-A INNER JOIN B = B INNER JOIN A
-```
-
-**3. Column Alias Normalization** ⭐
-```sql
--- These share one MV (aliases ignored in pattern):
-COUNT(*) as cnt = COUNT(*) as total = COUNT(*)
-```
-
----
-
-## 📊 Performance
-
-### Test Results
-
-| Test Suite | Status |
-|------------|--------|
-| Unit Tests | ✅ 27/27 passing |
-| Integration Tests | ✅ 13/14 passing |
-| Regression Tests | ✅ 22/22 passing |
-| **Total** | **✅ 31/32 (96.9%)** |
-
-### Benchmarks
-
-- **MV Reduction**: Up to 75% fewer redundant MVs
-- **Query Speedup**: 10-100x for JOIN aggregations
-- **Overhead**: < 1% for normalization
-- **Storage Savings**: 50% typical
-
----
-
-## 🔧 Supported Features
-
-### ✅ Fully Supported
-
-- INNER/LEFT/RIGHT/FULL JOINs
-- GROUP BY aggregations
-- Multiple aggregates (COUNT, SUM, AVG, MIN, MAX)
-- WHERE filters (filter-agnostic for JOINs)
-- ORDER BY
-- LIMIT
-- HAVING
-- Cross-database joins
-- Column aliases (automatic normalization)
-- Join order variations (automatic normalization)
-
-### ⚠️ Known Limitations
-
-1. **DISTINCT on JOINs** - Known bug, deferred
-   - Simple DISTINCT works ✅
-   - DISTINCT on JOINs incorrect ❌
-
-2. **Join Order Rewriting** - Partial limitation
-   - MV creation works (reduces redundant MVs) ✅
-   - Query rewriting may require consistent join order ⚠️
-
-3. **Aggregate Re-aggregation** - Not supported
-   - Can't use `GROUP BY region, product` MV for `GROUP BY region` query
-
-**See**: [DISTINCT_LIMITATION.md](DISTINCT_LIMITATION.md) for details
-
----
-
-## 🌐 Comparison with Industry
-
-### Coral vs Snowflake
-
-| Feature | Coral | Snowflake |
-|---------|-------|-----------|
-| Basic Query Rewriting | ✅ | ✅ |
-| Filter-Agnostic | ✅ | ✅ |
-| Join Order Normalization | ✅ | ❓ |
-| Column Alias Normalization | ✅ | ❓ |
-| Cost-Based Selection | ❌ | ✅ |
-| Stale MV Handling | ❌ | ✅ |
-| Aggregate Re-aggregation | ❌ | ✅ |
-
-**See**: [SNOWFLAKE_COMPARISON.md](SNOWFLAKE_COMPARISON.md) for detailed comparison
-
----
-
-## 🤝 Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
-
-### Development Setup
+1. Create a database called `db1` in local metastore using the `/api/catalog-ops/execute` endpoint
 
 ```bash
-# Clone repository
-git clone <repo-url>
-cd coral
+curl --header "Content-Type: application/json" \
+  --request POST \
+  --data "CREATE DATABASE IF NOT EXISTS db1" \
+  http://localhost:8080/api/catalog-ops/execute
 
-# Build
-./gradlew build -x spotlessJava -x spotlessCheck -x test
+Creation successful
+```
+2. Create a table called `airport` within `db1` in local metastore using the `/api/catalog-ops/execute` endpoint
 
-# Run tests
-./gradlew :coral-materialized-view:test
+```bash
+curl --header "Content-Type: application/json" \
+  --request POST \
+  --data "CREATE TABLE IF NOT EXISTS db1.airport(name string, country string, area_code int, code string, datepartition string)" \
+  http://localhost:8080/api/catalog-ops/execute
+
+Creation successful
 ```
 
----
+3. Translate a query on `db1.airport` in local metastore using the `/api/translations/translate` endpoint
 
-## 📞 Support
+```bash
+curl --header "Content-Type: application/json" \
+  --request POST \
+  --data '{
+    "sourceLanguage":"hive", 
+    "targetLanguage":"trino", 
+    "query":"SELECT * FROM db1.airport"
+  }' \
+  http://localhost:8080/api/translations/translate
+```
+The translation result is:
+```
+Original query in HiveQL:
+SELECT * FROM db1.airport
+Translated to Trino SQL:
+SELECT "name", "country", "area_code", "code", "datepartition"
+FROM "db1"."airport"
+```
 
-- **Issues**: GitHub Issues
-- **Documentation**: See [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)
-- **API Reference**: See [API_QUICK_REFERENCE.md](API_QUICK_REFERENCE.md)
 
----
-
-## 📄 License
-
-BSD-2 Clause License. See LICENSE file for details.
-
----
-
-## 🙏 Acknowledgments
-
-- Built on Apache Calcite
-- Inspired by Snowflake, BigQuery, Oracle
-- LinkedIn Engineering team
-
----
-
-**Latest Update**: 2026-01-26
-**Version**: 2.2.60
-**Status**: Production Ready ✅
+### Currently Supported Translation Flows
+1. Hive to Trino
+2. Hive to Spark
+3. Trino to Spark  
+   Note: During Trino to Spark translations, views referenced in queries are considered to be defined in HiveQL and hence cannot be used when translating a view from Trino. Currently, only referencing base tables is supported in Trino queries. This translation path is currently a POC and may need further improvements.
+4. Spark to Trino
