@@ -136,8 +136,7 @@ public class MaterializedViewOptimizerTest {
     List<String> queries = Arrays.asList(
         "SELECT t1.a, COUNT(*) as cnt FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a",
         "SELECT t1.a, COUNT(*) as total FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a",
-        "SELECT t1.a, COUNT(*) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a"
-    );
+        "SELECT t1.a, COUNT(*) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a");
 
     try {
       MaterializedViewOptimizer optimizer = new MaterializedViewOptimizer(msc);
@@ -164,8 +163,7 @@ public class MaterializedViewOptimizerTest {
     List<String> queries = Arrays.asList(
         "SELECT t1.a, COUNT(*) as cnt, SUM(t1.b) as total FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a",
         "SELECT t1.a, COUNT(*) as count_val, SUM(t1.b) as sum_val FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a",
-        "SELECT t1.a, COUNT(*), SUM(t1.b) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a"
-    );
+        "SELECT t1.a, COUNT(*), SUM(t1.b) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a");
 
     try {
       MaterializedViewOptimizer optimizer = new MaterializedViewOptimizer(msc);
@@ -192,8 +190,7 @@ public class MaterializedViewOptimizerTest {
     // A JOIN B should equal B JOIN A (join order normalized)
     List<String> queries = Arrays.asList(
         "SELECT t1.a, COUNT(*) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a",
-        "SELECT t2.x, COUNT(*) FROM default.tableTwo t2 JOIN default.tableOne t1 ON t2.x = t1.a GROUP BY t2.x"
-    );
+        "SELECT t2.x, COUNT(*) FROM default.tableTwo t2 JOIN default.tableOne t1 ON t2.x = t1.a GROUP BY t2.x");
 
     try {
       MaterializedViewOptimizer optimizer = new MaterializedViewOptimizer(msc);
@@ -221,8 +218,7 @@ public class MaterializedViewOptimizerTest {
     List<String> queries = Arrays.asList(
         "SELECT t1.a, COUNT(*) as cnt FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a",
         "SELECT t2.x, COUNT(*) as total FROM default.tableTwo t2 JOIN default.tableOne t1 ON t2.x = t1.a GROUP BY t2.x",
-        "SELECT t1.a, COUNT(*) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a"
-    );
+        "SELECT t1.a, COUNT(*) FROM default.tableOne t1 JOIN default.tableTwo t2 ON t1.a = t2.x GROUP BY t1.a");
 
     try {
       MaterializedViewOptimizer optimizer = new MaterializedViewOptimizer(msc);
@@ -232,8 +228,7 @@ public class MaterializedViewOptimizerTest {
 
       // Both join order AND aliases should be normalized
       // All three queries should share same MV
-      assertTrue(result.getCommonSubexpressions().size() > 0,
-          "Join order + alias variations should all share same MV");
+      assertTrue(result.getCommonSubexpressions().size() > 0, "Join order + alias variations should all share same MV");
 
       System.out.println("Join Order + Alias Test Result: " + result.getReport());
 

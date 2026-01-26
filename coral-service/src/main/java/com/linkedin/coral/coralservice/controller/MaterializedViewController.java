@@ -309,14 +309,13 @@ public class MaterializedViewController implements ApplicationListener<ContextRe
         // Now rewrite the query using the MV from the registry
         // Create a subexpression map with the matched pattern
         Map<String, CommonSubexpressionFinder.SubexpressionInfo> subexprMap = new HashMap<>();
-        subexprMap.put(matchResult.getPatternHash(),
-            new CommonSubexpressionFinder.SubexpressionInfo(matchResult.getMatchedNode(), matchResult.getPatternHash()));
+        subexprMap.put(matchResult.getPatternHash(), new CommonSubexpressionFinder.SubexpressionInfo(
+            matchResult.getMatchedNode(), matchResult.getPatternHash()));
 
         // Create MV info map for the QueryRewriter
         Map<String, MaterializedViewGenerator.MaterializedViewInfo> mvMap = new HashMap<>();
-        mvMap.put(matchResult.getPatternHash(),
-            new MaterializedViewGenerator.MaterializedViewInfo(matchedMV.getViewName(), matchedMV.getViewSql(),
-                matchResult.getMatchedNode()));
+        mvMap.put(matchResult.getPatternHash(), new MaterializedViewGenerator.MaterializedViewInfo(
+            matchedMV.getViewName(), matchedMV.getViewSql(), matchResult.getMatchedNode()));
 
         // Rewrite the query
         QueryRewriter rewriter = new QueryRewriter(converter);
@@ -327,7 +326,8 @@ public class MaterializedViewController implements ApplicationListener<ContextRe
                 matchResult.getPatternHash(), rewriteResult.getReplacementCount()));
       } else {
         // No match - return original query
-        return ResponseEntity.status(HttpStatus.OK).body(RewriteQueryResponse.noMatch(query, matchResult.getQueryPatternHash()));
+        return ResponseEntity.status(HttpStatus.OK)
+            .body(RewriteQueryResponse.noMatch(query, matchResult.getQueryPatternHash()));
       }
 
     } catch (Exception e) {
