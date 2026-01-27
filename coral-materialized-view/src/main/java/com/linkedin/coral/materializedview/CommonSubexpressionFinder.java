@@ -17,23 +17,6 @@ import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.Project;
 
 
-/**
- * Finds common subexpressions across multiple RelNode trees.
- *
- * GENERIC DESIGN:
- * This implementation is designed to work with ANY join pattern:
- * - INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL OUTER JOIN
- * - Simple 2-table joins: A JOIN B
- * - Complex multi-table joins: A JOIN B JOIN C JOIN D
- * - Nested joins: (A JOIN B) JOIN (C JOIN D)
- * - Joins with any table names, databases, conditions
- * - Joins with filters, projections, aggregations on top (future enhancement)
- *
- * The key to genericity:
- * 1. Uses structural comparison (RelNode digest), not hardcoded patterns
- * 2. Works with Calcite's abstract Join class (covers all join types)
- * 3. Configurable pattern detection via PatternDetectionMode
- */
 public class CommonSubexpressionFinder {
 
   /**
@@ -50,8 +33,8 @@ public class CommonSubexpressionFinder {
    * Strategy for filtering nested patterns.
    */
   public enum NestedPatternFilterStrategy {
-    STRING_BASED, // Use string containment (simple, works for small workloads)
-    HASH_BASED // Use Merkle tree hashing (fast, scales to large workloads)
+    STRING_BASED, // Use string containment
+    HASH_BASED // Use Merkle tree hashing
   }
 
   private PatternDetectionMode detectionMode = PatternDetectionMode.JOINS_ONLY;
