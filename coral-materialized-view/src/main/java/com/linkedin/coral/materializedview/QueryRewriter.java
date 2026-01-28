@@ -17,7 +17,10 @@ import org.apache.calcite.rel.RelDistributions;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelReferentialConstraint;
 import org.apache.calcite.rel.RelShuttleImpl;
+import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.JoinRelType;
+import org.apache.calcite.rel.logical.LogicalAggregate;
+import org.apache.calcite.rel.logical.LogicalFilter;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
@@ -166,8 +169,8 @@ public class QueryRewriter {
               RelOptCluster cluster = node.getCluster();
               RelNode matchedSubtree = node; // Use current node, not representative
 
-              // Build standard replacement (direct TableScan)
-              RelNode replacement = buildStandardReplacement(matchedSubtree, mvInfo, cluster);
+              // Build standard replacement (direct TableScan, no residual filter for exact match)
+              RelNode replacement = buildStandardReplacement(matchedSubtree, mvInfo, cluster, null);
 
               replacementCount++;
               System.out.println("\n*** REPLACEMENT SUCCESSFUL! ***");
@@ -192,10 +195,210 @@ public class QueryRewriter {
         }
       }
 
+      // Try filter implication matching
+      System.out.println("\nDEBUG: No exact match found. Trying filter implication...");
+      RelNode filterMatch = tryFilterImplicationRewrite(node);
+      if (filterMatch != null) {
+        return filterMatch;
+      }
+
       System.out.println("\nDEBUG: No match found for this node");
       System.out.println("========================================\n");
 
       // No match found - return null to indicate no replacement
+      return null;
+    }
+
+    /**
+     * Try to rewrite using filter implication logic.
+     * Checks if query filter implies any registered MV's filter.
+     */
+    private RelNode tryFilterImplicationRewrite(RelNode node) {
+      // Extract query filter
+      RexNode queryFilter = extractFilterFromNode(node);
+      if (queryFilter == null) {
+        System.out.println("DEBUG: No filter found in query node, skipping filter implication");
+        return null; // No filter to check
+      }
+
+      System.out.println("DEBUG: Query has filter: " + queryFilter);
+
+      // Try matching against each registered pattern
+      for (Map.Entry<String, CommonSubexpressionFinder.SubexpressionInfo> entry : subexpressionMap.entrySet()) {
+        CommonSubexpressionFinder.SubexpressionInfo subexprInfo = entry.getValue();
+        MaterializedViewGenerator.MaterializedViewInfo mvInfo = materializedViews.get(entry.getKey());
+
+        if (mvInfo == null) {
+          continue;
+        }
+
+        // Get MV pattern
+        RelNode mvPattern = mvInfo.getOriginalNode();
+        if (mvPattern == null) {
+          continue;
+        }
+
+        // Extract MV filter
+        RexNode mvFilter = extractFilterFromNode(mvPattern);
+        if (mvFilter == null) {
+          continue; // MV has no filter
+        }
+
+        System.out.println("DEBUG: Checking implication against MV: " + mvInfo.getViewName());
+        System.out.println("DEBUG: MV filter: " + mvFilter);
+
+        // Check if query filter implies MV filter
+        RexBuilder rexBuilder = node.getCluster().getRexBuilder();
+        FilterImplicationChecker.ImplicationResult result =
+            FilterImplicationChecker.checkImplication(queryFilter, mvFilter, rexBuilder);
+
+        if (result.implies()) {
+          System.out.println("\n*** FILTER IMPLICATION MATCH FOUND! ***");
+          System.out.println("DEBUG: Query filter implies MV filter");
+          System.out.println("DEBUG: Residual filter: " + (result.getResidualFilter() != null ? result.getResidualFilter() : "none"));
+
+          // Validate that residual filter can be applied to MV schema
+          if (result.getResidualFilter() != null) {
+            if (!canApplyResidualFilter(result.getResidualFilter(), mvPattern, node)) {
+              System.out.println("DEBUG: Cannot apply residual filter - required columns not in MV output");
+              System.out.println("DEBUG: Skipping filter implication for this MV");
+              continue; // Try next MV
+            }
+          }
+
+          try {
+            RelOptCluster cluster = node.getCluster();
+            RelNode replacement = buildStandardReplacement(node, mvInfo, cluster, result.getResidualFilter());
+
+            replacementCount++;
+            System.out.println("DEBUG: Replaced with MV (filter implication): " + mvInfo.getViewName());
+            System.out.println("DEBUG: Replacement count now: " + replacementCount);
+            System.out.println("========================================\n");
+
+            return replacement;
+
+          } catch (Exception e) {
+            System.err.println("ERROR: Failed to create MV replacement with filter implication");
+            e.printStackTrace();
+          }
+        }
+      }
+
+      return null; // No filter implication match found
+    }
+
+    /**
+     * Check if a residual filter can be applied to an MV.
+     * The residual filter can only reference columns that exist in the MV output.
+     *
+     * For aggregated MVs, only GROUP BY columns are available in the output.
+     * For non-aggregated MVs, all projected columns are available.
+     *
+     * @param residualFilter The filter to apply
+     * @param mvPattern The MV's original RelNode pattern
+     * @param queryNode The query node (for column name mapping)
+     * @return true if the filter can be applied, false otherwise
+     */
+    private boolean canApplyResidualFilter(RexNode residualFilter, RelNode mvPattern, RelNode queryNode) {
+      if (residualFilter == null) {
+        return true; // No filter to apply
+      }
+
+      // Get the output schema of the MV
+      RelDataType mvOutputType = mvPattern.getRowType();
+      List<String> mvColumns = mvOutputType.getFieldNames();
+
+      // Get the query's input schema (before filtering/aggregation)
+      RelDataType queryInputType = getInputType(queryNode);
+      if (queryInputType == null) {
+        System.out.println("DEBUG: Cannot determine query input type, allowing filter application");
+        return true; // Conservative: allow if we can't determine
+      }
+
+      List<String> queryColumns = queryInputType.getFieldNames();
+
+      // Extract field references from the residual filter
+      java.util.Set<Integer> referencedFields = new java.util.HashSet<>();
+      extractFieldReferences(residualFilter, referencedFields);
+
+      // Check if all referenced fields exist in MV output
+      for (Integer fieldIndex : referencedFields) {
+        if (fieldIndex >= queryColumns.size()) {
+          System.out.println("DEBUG: Field index " + fieldIndex + " out of bounds");
+          return false;
+        }
+
+        String fieldName = queryColumns.get(fieldIndex);
+        if (!mvColumns.contains(fieldName)) {
+          System.out.println("DEBUG: Field '" + fieldName + "' (index " + fieldIndex + ") not in MV output: " + mvColumns);
+          return false;
+        }
+      }
+
+      System.out.println("DEBUG: All residual filter fields available in MV output");
+      return true;
+    }
+
+    /**
+     * Get the input type (schema before filtering/aggregation) of a RelNode.
+     */
+    private RelDataType getInputType(RelNode node) {
+      if (node instanceof LogicalFilter) {
+        return getInputType(node.getInput(0));
+      }
+      if (node instanceof Aggregate) {
+        return getInputType(node.getInput(0));
+      }
+      if (node instanceof org.apache.calcite.rel.logical.LogicalProject) {
+        return getInputType(node.getInput(0));
+      }
+      if (node instanceof org.apache.calcite.rel.core.TableScan) {
+        return node.getRowType();
+      }
+      // For joins or other complex nodes, return their row type
+      return node.getRowType();
+    }
+
+    /**
+     * Extract all field references from a RexNode.
+     */
+    private void extractFieldReferences(RexNode node, java.util.Set<Integer> fields) {
+      if (node instanceof org.apache.calcite.rex.RexInputRef) {
+        fields.add(((org.apache.calcite.rex.RexInputRef) node).getIndex());
+      } else if (node instanceof org.apache.calcite.rex.RexCall) {
+        for (RexNode operand : ((org.apache.calcite.rex.RexCall) node).getOperands()) {
+          extractFieldReferences(operand, fields);
+        }
+      }
+    }
+
+    /**
+     * Extract filter RexNode from a RelNode.
+     * Handles LogicalFilter and LogicalAggregate (with filter as input).
+     */
+    private RexNode extractFilterFromNode(RelNode node) {
+      if (node instanceof LogicalFilter) {
+        return ((LogicalFilter) node).getCondition();
+      }
+
+      if (node instanceof Aggregate) {
+        Aggregate agg = (Aggregate) node;
+        RelNode input = agg.getInput();
+
+        // Check direct input
+        if (input instanceof LogicalFilter) {
+          return ((LogicalFilter) input).getCondition();
+        }
+
+        // Check through Project node
+        if (input instanceof org.apache.calcite.rel.logical.LogicalProject) {
+          RelNode projectInput = input.getInput(0);
+          if (projectInput instanceof LogicalFilter) {
+            return ((LogicalFilter) projectInput).getCondition();
+          }
+        }
+      }
+
       return null;
     }
 
@@ -272,35 +475,22 @@ public class QueryRewriter {
      * - Other nodes: Exact digest
      */
     private String computeDigestForMatching(RelNode node) {
-      if (node instanceof org.apache.calcite.rel.core.Aggregate) {
-        org.apache.calcite.rel.core.Aggregate agg = (org.apache.calcite.rel.core.Aggregate) node;
+      // Strip Sort (ORDER BY, LIMIT) nodes - they don't affect aggregation results
+      RelNode coreNode = stripSort(node);
 
-        // Check if this aggregation has joins underneath
-        boolean hasJoins = hasJoinBelow(agg);
+      // Use exact matching for everything else (includes filters, joins, aggregations)
+      return RelOptUtil.toString(coreNode);
+    }
 
-        if (hasJoins) {
-          // CASE 1: Aggregation on JOIN → Filter-agnostic matching
-          // Build core digest: Aggregate structure + input without filters
-          StringBuilder coreDigest = new StringBuilder();
-          coreDigest.append("AggregationCore[");
-          coreDigest.append("groupSet=").append(agg.getGroupSet()).append(", ");
-
-          coreDigest.append("aggCalls=").append(agg.getAggCallList()).append(", ");
-
-          coreDigest.append("input=").append(computeInputDigestWithoutFilters(agg.getInput()));
-          coreDigest.append("]");
-
-          System.out.println("      Aggregation on JOIN detected → Using filter-agnostic digest for matching");
-          return coreDigest.toString();
-        } else {
-          // CASE 2: Single-table aggregation → Exact matching
-          System.out.println("      Single-table aggregation detected → Using exact digest for matching");
-          return RelOptUtil.toString(node);
-        }
+    /**
+     * Strip Sort nodes (ORDER BY, LIMIT) from the top of the tree.
+     * These don't affect aggregation results and can be applied after reading MV.
+     */
+    private RelNode stripSort(RelNode node) {
+      if (node instanceof org.apache.calcite.rel.core.Sort) {
+        return stripSort(node.getInput(0));
       }
-
-      // For non-aggregation nodes, use exact digest
-      return RelOptUtil.toString(node);
+      return node;
     }
 
     /**
@@ -398,8 +588,11 @@ public class QueryRewriter {
      * Simply replaces the matched subtree with a scan of the MV table.
      */
     private RelNode buildStandardReplacement(RelNode matchedSubtree,
-        MaterializedViewGenerator.MaterializedViewInfo mvInfo, RelOptCluster cluster) {
+        MaterializedViewGenerator.MaterializedViewInfo mvInfo, RelOptCluster cluster, RexNode residualFilter) {
       System.out.println("  Building standard TableScan replacement");
+      if (residualFilter != null) {
+        System.out.println("  With residual filter: " + residualFilter);
+      }
 
       // Get expected column names from the query
       RelDataType queryRowType = matchedSubtree.getRowType();
@@ -417,6 +610,22 @@ public class QueryRewriter {
       RelOptTable mvTable = new SyntheticMvTable(qualifiedName, queryRowType, syntheticMvTable);
       RelNode mvScan = LogicalTableScan.create(cluster, mvTable);
 
+      // Apply residual filter if present (with field remapping)
+      if (residualFilter != null) {
+        System.out.println("  Applying residual filter on top of MV scan");
+
+        // Remap field indices from query schema to MV output schema
+        RelNode mvPattern = mvInfo.getOriginalNode();
+        RexNode remappedFilter = remapFilterFields(residualFilter, matchedSubtree, mvPattern, cluster);
+
+        if (remappedFilter != null) {
+          System.out.println("  Remapped filter: " + remappedFilter);
+          mvScan = LogicalFilter.create(mvScan, remappedFilter);
+        } else {
+          System.out.println("  WARNING: Could not remap filter, skipping");
+        }
+      }
+
       // Get actual MV column names
       RelDataType mvRowType = mvScan.getRowType();
 
@@ -428,6 +637,90 @@ public class QueryRewriter {
 
       System.out.println("  Standard replacement complete: SELECT * FROM " + String.join(".", qualifiedName));
       return mvScan;
+    }
+
+    /**
+     * Remap field references in a filter from query input schema to MV output schema.
+     *
+     * Example:
+     * Query input schema: [id, name, location, exp, country, dept] - country at index 4
+     * MV output schema: [location, country, COUNT(*)] - country at index 1
+     * Filter: =($4, 'US') needs to become =($1, 'US')
+     *
+     * @param filter The original filter with query input field indices
+     * @param queryNode The query node (to get input schema)
+     * @param mvPattern The MV pattern (to get output schema)
+     * @param cluster The cluster for creating new RexNodes
+     * @return Remapped filter, or null if remapping fails
+     */
+    private RexNode remapFilterFields(RexNode filter, RelNode queryNode, RelNode mvPattern, RelOptCluster cluster) {
+      // Get schemas
+      RelDataType queryInputType = getInputType(queryNode);
+      RelDataType mvOutputType = mvPattern.getRowType();
+
+      if (queryInputType == null || mvOutputType == null) {
+        System.out.println("  ERROR: Cannot determine schemas for field remapping");
+        return null;
+      }
+
+      List<String> queryInputFields = queryInputType.getFieldNames();
+      List<String> mvOutputFields = mvOutputType.getFieldNames();
+
+      System.out.println("  Query input fields: " + queryInputFields);
+      System.out.println("  MV output fields: " + mvOutputFields);
+
+      // Build mapping: query input index -> MV output index
+      java.util.Map<Integer, Integer> indexMap = new java.util.HashMap<>();
+      for (int queryIdx = 0; queryIdx < queryInputFields.size(); queryIdx++) {
+        String fieldName = queryInputFields.get(queryIdx);
+        int mvIdx = mvOutputFields.indexOf(fieldName);
+        if (mvIdx >= 0) {
+          indexMap.put(queryIdx, mvIdx);
+          System.out.println("  Mapping: $" + queryIdx + " (" + fieldName + ") -> $" + mvIdx);
+        }
+      }
+
+      // Transform the filter using the index mapping
+      RexBuilder rexBuilder = cluster.getRexBuilder();
+      return remapRexNode(filter, indexMap, rexBuilder);
+    }
+
+    /**
+     * Recursively remap field indices in a RexNode.
+     */
+    private RexNode remapRexNode(RexNode node, java.util.Map<Integer, Integer> indexMap, RexBuilder rexBuilder) {
+      if (node instanceof org.apache.calcite.rex.RexInputRef) {
+        org.apache.calcite.rex.RexInputRef inputRef = (org.apache.calcite.rex.RexInputRef) node;
+        int oldIndex = inputRef.getIndex();
+
+        if (indexMap.containsKey(oldIndex)) {
+          int newIndex = indexMap.get(oldIndex);
+          System.out.println("    Remapping field reference: $" + oldIndex + " -> $" + newIndex);
+          return rexBuilder.makeInputRef(inputRef.getType(), newIndex);
+        } else {
+          System.out.println("    WARNING: Field $" + oldIndex + " not found in MV output");
+          return null;
+        }
+      } else if (node instanceof org.apache.calcite.rex.RexCall) {
+        org.apache.calcite.rex.RexCall call = (org.apache.calcite.rex.RexCall) node;
+        List<RexNode> newOperands = new ArrayList<>();
+
+        for (RexNode operand : call.getOperands()) {
+          RexNode remapped = remapRexNode(operand, indexMap, rexBuilder);
+          if (remapped == null) {
+            return null; // Failed to remap
+          }
+          newOperands.add(remapped);
+        }
+
+        return rexBuilder.makeCall(call.getOperator(), newOperands);
+      } else if (node instanceof org.apache.calcite.rex.RexLiteral) {
+        // Literals don't need remapping
+        return node;
+      }
+
+      // For other node types, return as-is
+      return node;
     }
 
     /**

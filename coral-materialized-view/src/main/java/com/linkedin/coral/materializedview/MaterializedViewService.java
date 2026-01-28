@@ -67,8 +67,8 @@ public class MaterializedViewService {
       MaterializedViewInfo mvInfo = entry.getValue();
       SubexpressionInfo subexprInfo = result.getCommonSubexpressions().get(patternHash);
 
-      // Store in registry
-      registry.register(patternHash, mvInfo.getViewName(), mvInfo.getViewSql());
+      // Store in registry (with pattern for filter implication)
+      registry.register(patternHash, mvInfo.getViewName(), mvInfo.getViewSql(), mvInfo.getOriginalNode());
 
       // Add to response
       int usedInQueries = subexprInfo != null ? subexprInfo.getOccurrenceCount() : 0;
@@ -115,7 +115,7 @@ public class MaterializedViewService {
 
       Map<String, MaterializedViewInfo> mvMap = new HashMap<>();
       mvMap.put(matchResult.getPatternHash(),
-          new MaterializedViewInfo(matchedMV.getViewName(), matchedMV.getViewSql(), matchResult.getMatchedNode()));
+          new MaterializedViewInfo(matchedMV.getViewName(), matchedMV.getViewSql(), matchedMV.getPattern()));
 
       // Rewrite the query
       QueryRewriter rewriter = new QueryRewriter(converter);

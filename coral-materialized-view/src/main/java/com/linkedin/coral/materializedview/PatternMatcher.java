@@ -16,6 +16,8 @@ import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalFilter;
 import org.apache.calcite.rel.logical.LogicalJoin;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexNode;
 
 
 /**
@@ -76,41 +78,111 @@ public class PatternMatcher extends RelShuttleImpl {
       result.setQueryPatternHash(digest);
     }
 
-    // Check if this digest matches anything in the registry
+    // Try exact match first (fast path)
     if (registry.contains(digest) && !result.hasMatch()) {
-      // Found a match!
+      // Found exact match!
       MaterializedViewRegistry.StoredMaterializedView mv = registry.get(digest);
-      result.setMatch(digest, mv, node);
+      result.setMatch(digest, mv, node, null); // No residual filter for exact match
+      return;
     }
+
+    // Try filter implication matching
+    if (!result.hasMatch()) {
+      tryFilterImplicationMatch(node);
+    }
+  }
+
+  /**
+   * Try to match using filter implication logic.
+   * Checks if the query's filter implies any registered MV's filter.
+   */
+  private void tryFilterImplicationMatch(RelNode node) {
+    // Extract query filter
+    RexNode queryFilter = extractFilter(node);
+    if (queryFilter == null) {
+      return; // No filter to check
+    }
+
+    // Try matching against each registered MV
+    for (String mvDigest : registry.getAllDigests()) {
+      MaterializedViewRegistry.StoredMaterializedView mv = registry.get(mvDigest);
+
+      // Get the MV's pattern (RelNode)
+      RelNode mvPattern = mv.getPattern();
+      if (mvPattern == null) {
+        continue; // No pattern available
+      }
+
+      // Extract MV filter
+      RexNode mvFilter = extractFilter(mvPattern);
+      if (mvFilter == null) {
+        continue; // MV has no filter, skip implication check
+      }
+
+      // Check if query filter implies MV filter
+      RexBuilder rexBuilder = node.getCluster().getRexBuilder();
+      FilterImplicationChecker.ImplicationResult implicationResult =
+          FilterImplicationChecker.checkImplication(queryFilter, mvFilter, rexBuilder);
+
+      if (implicationResult.implies()) {
+        // Match found with possible residual filter
+        result.setMatch(mvDigest, mv, node, implicationResult.getResidualFilter());
+        return; // Take first match
+      }
+    }
+  }
+
+  /**
+   * Extract filter RexNode from a RelNode.
+   * Handles LogicalFilter and LogicalAggregate (with filter as input).
+   * Traverses through Project nodes to find filters.
+   */
+  private RexNode extractFilter(RelNode node) {
+    if (node instanceof LogicalFilter) {
+      return ((LogicalFilter) node).getCondition();
+    }
+
+    if (node instanceof LogicalAggregate) {
+      LogicalAggregate agg = (LogicalAggregate) node;
+      RelNode input = agg.getInput();
+
+      // Check direct input
+      if (input instanceof LogicalFilter) {
+        return ((LogicalFilter) input).getCondition();
+      }
+
+      // Check through Project node
+      if (input instanceof org.apache.calcite.rel.logical.LogicalProject) {
+        RelNode projectInput = input.getInput(0);
+        if (projectInput instanceof LogicalFilter) {
+          return ((LogicalFilter) projectInput).getCondition();
+        }
+      }
+    }
+
+    return null;
   }
 
   /**
    * Compute digest for a node, mirroring CommonSubexpressionFinder logic.
    */
   private String computeDigest(RelNode node) {
-    if (node instanceof Aggregate) {
-      Aggregate agg = (Aggregate) node;
+    // Strip Sort (ORDER BY, LIMIT) nodes - they don't affect aggregation results
+    RelNode coreNode = stripSort(node);
 
-      // Check if this aggregation has joins underneath
-      boolean hasJoins = hasJoinBelow(agg);
+    // Use exact matching for everything else (includes filters, joins, aggregations)
+    return RelOptUtil.toString(coreNode);
+  }
 
-      if (hasJoins) {
-        // CASE 1: Aggregation on JOIN → Filter-agnostic matching
-        StringBuilder coreDigest = new StringBuilder();
-        coreDigest.append("AggregationCore[");
-        coreDigest.append("groupSet=").append(agg.getGroupSet()).append(", ");
-        coreDigest.append("aggCalls=").append(agg.getAggCallList()).append(", ");
-        coreDigest.append("input=").append(computeInputDigestWithoutFilters(agg.getInput()));
-        coreDigest.append("]");
-        return coreDigest.toString();
-      } else {
-        // CASE 2: Single-table aggregation → Exact matching
-        return RelOptUtil.toString(node);
-      }
+  /**
+   * Strip Sort nodes (ORDER BY, LIMIT) from the top of the tree.
+   * These don't affect aggregation results and can be applied after reading MV.
+   */
+  private RelNode stripSort(RelNode node) {
+    if (node instanceof Sort) {
+      return stripSort(node.getInput(0));
     }
-
-    // For non-aggregation nodes, use exact digest
-    return RelOptUtil.toString(node);
+    return node;
   }
 
   /**
@@ -193,12 +265,15 @@ public class PatternMatcher extends RelShuttleImpl {
     private MaterializedViewRegistry.StoredMaterializedView matchedMV;
     private RelNode matchedNode;
     private String queryPatternHash = "no-pattern";
+    private RexNode residualFilter; // Filter to apply on top of MV (null if exact match)
 
-    public void setMatch(String patternHash, MaterializedViewRegistry.StoredMaterializedView mv, RelNode node) {
+    public void setMatch(String patternHash, MaterializedViewRegistry.StoredMaterializedView mv, RelNode node,
+        RexNode residualFilter) {
       this.hasMatch = true;
       this.patternHash = patternHash;
       this.matchedMV = mv;
       this.matchedNode = node;
+      this.residualFilter = residualFilter;
     }
 
     public void setQueryPatternHash(String hash) {
@@ -223,6 +298,14 @@ public class PatternMatcher extends RelShuttleImpl {
 
     public String getQueryPatternHash() {
       return queryPatternHash;
+    }
+
+    public RexNode getResidualFilter() {
+      return residualFilter;
+    }
+
+    public boolean hasResidualFilter() {
+      return residualFilter != null;
     }
   }
 }

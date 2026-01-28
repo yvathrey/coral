@@ -10,6 +10,8 @@ import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.calcite.rel.RelNode;
+
 
 /**
  * Thread-safe registry for storing and managing materialized views.
@@ -39,7 +41,21 @@ public class MaterializedViewRegistry {
    * @return The stored materialized view
    */
   public StoredMaterializedView register(String patternHash, String viewName, String viewSql) {
+    return register(patternHash, viewName, viewSql, null);
+  }
+
+  /**
+   * Register a new materialized view in the registry with pattern.
+   *
+   * @param patternHash Unique hash identifying the query pattern
+   * @param viewName Name of the materialized view
+   * @param viewSql SQL definition of the materialized view
+   * @param pattern Query pattern (RelNode tree) - optional, used for filter implication
+   * @return The stored materialized view
+   */
+  public StoredMaterializedView register(String patternHash, String viewName, String viewSql, RelNode pattern) {
     StoredMaterializedView mv = new StoredMaterializedView(viewName, viewSql, patternHash);
+    mv.setPattern(pattern);
     registry.put(patternHash, mv);
     return mv;
   }
@@ -71,6 +87,15 @@ public class MaterializedViewRegistry {
    */
   public Collection<StoredMaterializedView> getAll() {
     return registry.values();
+  }
+
+  /**
+   * Get all pattern hashes (digests) in the registry.
+   *
+   * @return Collection of all pattern hashes
+   */
+  public Collection<String> getAllDigests() {
+    return registry.keySet();
   }
 
   /**
@@ -115,6 +140,7 @@ public class MaterializedViewRegistry {
     private final Instant createdAt;
     private Instant lastUsedAt;
     private int usageCount;
+    private RelNode pattern; // Query pattern (RelNode tree) - optional, used for filter implication
 
     public StoredMaterializedView(String viewName, String viewSql, String patternHash) {
       this.viewName = viewName;
@@ -123,6 +149,7 @@ public class MaterializedViewRegistry {
       this.createdAt = Instant.now();
       this.lastUsedAt = null;
       this.usageCount = 0;
+      this.pattern = null;
     }
 
     public void recordUsage() {
@@ -152,6 +179,14 @@ public class MaterializedViewRegistry {
 
     public int getUsageCount() {
       return usageCount;
+    }
+
+    public RelNode getPattern() {
+      return pattern;
+    }
+
+    public void setPattern(RelNode pattern) {
+      this.pattern = pattern;
     }
   }
 }

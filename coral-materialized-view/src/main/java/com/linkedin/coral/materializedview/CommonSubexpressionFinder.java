@@ -15,6 +15,7 @@ import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Sort;
 
 
 public class CommonSubexpressionFinder {
@@ -373,14 +374,22 @@ public class CommonSubexpressionFinder {
      * GROUP BY + aggregates + input structure, excluding WHERE filters.
      */
     private String computeDigest(RelNode node) {
-      // For Aggregate nodes, compute core-based digest
-      if (node instanceof Aggregate) {
-        System.out.println("    -> Aggregation pattern: using core-based digest");
-        return computeAggregationCoreDigest(node);
-      }
+      // Strip Sort (ORDER BY, LIMIT) nodes - they don't affect aggregation results
+      RelNode coreNode = stripSort(node);
 
-      // For non-aggregation patterns, use standard digest
-      return RelOptUtil.toString(node);
+      // Use exact matching for everything else (includes filters, joins, aggregations)
+      return RelOptUtil.toString(coreNode);
+    }
+
+    /**
+     * Strip Sort nodes (ORDER BY, LIMIT) from the top of the tree.
+     * These don't affect aggregation results and can be applied after reading MV.
+     */
+    private RelNode stripSort(RelNode node) {
+      if (node instanceof Sort) {
+        return stripSort(node.getInput(0));
+      }
+      return node;
     }
 
     /**
