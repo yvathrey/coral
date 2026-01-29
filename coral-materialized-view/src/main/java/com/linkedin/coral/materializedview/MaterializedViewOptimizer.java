@@ -8,6 +8,8 @@ package com.linkedin.coral.materializedview;
 import java.util.*;
 
 import org.apache.calcite.rel.RelNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.linkedin.coral.common.HiveMetastoreClient;
 import com.linkedin.coral.hive.hive2rel.HiveToRelConverter;
@@ -30,6 +32,8 @@ import com.linkedin.coral.hive.hive2rel.HiveToRelConverter;
  */
 public class MaterializedViewOptimizer {
 
+  private static final Logger LOG = LoggerFactory.getLogger(MaterializedViewOptimizer.class);
+
   private final HiveToRelConverter hiveToRelConverter;
   private final CommonSubexpressionFinder subexpressionFinder;
   private final MaterializedViewGenerator viewGenerator;
@@ -37,23 +41,10 @@ public class MaterializedViewOptimizer {
 
   /**
    * Create a new optimizer with a HiveMetastoreClient for parsing SQL.
-   * Uses default string-based nested pattern filtering.
    */
   public MaterializedViewOptimizer(HiveMetastoreClient msc) {
-    this(msc, CommonSubexpressionFinder.NestedPatternFilterStrategy.HASH_BASED);
-  }
-
-  /**
-   * Create a new optimizer with a HiveMetastoreClient and specific filtering strategy.
-   *
-   * @param msc HiveMetastoreClient for parsing SQL
-   * @param filterStrategy Strategy for filtering nested patterns
-   */
-  public MaterializedViewOptimizer(HiveMetastoreClient msc,
-      CommonSubexpressionFinder.NestedPatternFilterStrategy filterStrategy) {
     this.hiveToRelConverter = new HiveToRelConverter(msc);
-    this.subexpressionFinder = new CommonSubexpressionFinder(
-        CommonSubexpressionFinder.PatternDetectionMode.JOINS_AND_AGGREGATES, filterStrategy);
+    this.subexpressionFinder = new CommonSubexpressionFinder();
     this.viewGenerator = new MaterializedViewGenerator();
     this.queryRewriter = new QueryRewriter(hiveToRelConverter);
   }
@@ -77,33 +68,53 @@ public class MaterializedViewOptimizer {
    */
   public OptimizationResult optimize(List<String> sqlQueries, int minOccurrences) {
     try {
-      System.out.println("\n********** MATERIALIZED VIEW OPTIMIZER **********");
-      System.out.println("Input: " + sqlQueries.size() + " queries, minOccurrences=" + minOccurrences);
+      LOG.debug("\n********** MATERIALIZED VIEW OPTIMIZER **********");
+      LOG.debug("Input: {} queries, minOccurrences={}", sqlQueries.size(), minOccurrences);
 
       // Step 1: Parse SQL queries to RelNodes
-      System.out.println("\n*** STEP 1: Parsing SQL to RelNodes ***");
+      LOG.debug("\n*** STEP 1: Parsing SQL to RelNodes ***");
       List<RelNode> queryPlans = new ArrayList<>();
       for (int i = 0; i < sqlQueries.size(); i++) {
         String sql = sqlQueries.get(i);
-        System.out.println("Query " + i + ": " + sql);
+        LOG.debug("Query {}: {}", i, sql);
         RelNode relNode = hiveToRelConverter.convertSql(sql);
         queryPlans.add(relNode);
-        System.out.println("  -> Parsed successfully");
+        LOG.debug("  -> Parsed successfully");
       }
 
       // Step 2: Find common subexpressions
-      System.out.println("\n*** STEP 2: Finding Common Subexpressions ***");
+      LOG.debug("\n*** STEP 2: Finding Common Subexpressions ***");
       Map<String, CommonSubexpressionFinder.SubexpressionInfo> commonSubexpressions =
           subexpressionFinder.findCommonSubexpressions(queryPlans, minOccurrences);
-      System.out.println("Found " + commonSubexpressions.size() + " common subexpressions");
+      LOG.debug("Found {} common subexpressions", commonSubexpressions.size());
 
       // Step 3: Generate materialized views for common subexpressions
-      System.out.println("\n*** STEP 3: Generating Materialized Views ***");
+      LOG.debug("\n*** STEP 3: Generating Materialized Views ***");
       Map<String, MaterializedViewGenerator.MaterializedViewInfo> materializedViews = new HashMap<>();
+      Set<CommonSubexpressionFinder.SubexpressionInfo> processedInfos = new HashSet<>();
       int mvIndex = 0;
+
       for (Map.Entry<String, CommonSubexpressionFinder.SubexpressionInfo> entry : commonSubexpressions.entrySet()) {
-        System.out.println("\nGenerating MV " + mvIndex + "...");
         CommonSubexpressionFinder.SubexpressionInfo subexprInfo = entry.getValue();
+
+        // Skip if we've already generated an MV for this SubexpressionInfo
+        // (multiple keys may point to the same merged pattern)
+        if (processedInfos.contains(subexprInfo)) {
+          LOG.debug("Skipping duplicate SubexpressionInfo (already processed)");
+          // BUT still add to materializedViews map so lookup by this key works
+          // Find the MV that was created for this SubexpressionInfo
+          for (Map.Entry<String, MaterializedViewGenerator.MaterializedViewInfo> mvEntry : materializedViews.entrySet()) {
+            if (commonSubexpressions.get(mvEntry.getKey()) == subexprInfo) {
+              materializedViews.put(entry.getKey(), mvEntry.getValue());
+              LOG.debug("Reusing MV: {} for key: {}", mvEntry.getValue().getViewName(),
+                  entry.getKey().substring(0, Math.min(50, entry.getKey().length())));
+              break;
+            }
+          }
+          continue;
+        }
+
+        LOG.debug("\nGenerating MV {}...", mvIndex);
 
         // HYBRID STRATEGY:
         // - Aggregations: Exact matching (standard MV captures exact query)
@@ -112,36 +123,36 @@ public class MaterializedViewOptimizer {
             viewGenerator.generateMaterializedView(subexprInfo.getRepresentativeNode());
 
         materializedViews.put(entry.getKey(), mvInfo);
-        System.out.println("  Created: " + mvInfo.getViewName());
-        System.out.println("  SQL: " + mvInfo.getViewSql());
+        processedInfos.add(subexprInfo);
+        LOG.debug("  Created: {}", mvInfo.getViewName());
+        LOG.debug("  SQL: {}", mvInfo.getViewSql());
         mvIndex++;
       }
 
       // Step 4: Rewrite queries to use materialized views
-      System.out.println("\n*** STEP 4: Rewriting Queries ***");
+      LOG.debug("\n*** STEP 4: Rewriting Queries ***");
       List<QueryRewriter.RewriteResult> rewrittenQueries = new ArrayList<>();
       for (int i = 0; i < queryPlans.size(); i++) {
-        System.out.println("\n=== Rewriting Query " + i + " ===");
+        LOG.debug("\n=== Rewriting Query {} ===", i);
         RelNode queryPlan = queryPlans.get(i);
         QueryRewriter.RewriteResult rewriteResult =
             queryRewriter.rewriteQuery(queryPlan, commonSubexpressions, materializedViews);
         rewrittenQueries.add(rewriteResult);
-        System.out.println("Rewrite complete. Replacements made: " + rewriteResult.getReplacementCount());
+        LOG.debug("Rewrite complete. Replacements made: {}", rewriteResult.getReplacementCount());
       }
 
-      System.out.println("\n*** OPTIMIZATION COMPLETE ***");
-      System.out.println("Total queries processed: " + sqlQueries.size());
-      System.out.println("Materialized views created: " + materializedViews.size());
+      LOG.debug("\n*** OPTIMIZATION COMPLETE ***");
+      LOG.debug("Total queries processed: {}", sqlQueries.size());
+      LOG.debug("Materialized views created: {}", materializedViews.size());
       int totalReplacements =
           rewrittenQueries.stream().mapToInt(QueryRewriter.RewriteResult::getReplacementCount).sum();
-      System.out.println("Total replacements made: " + totalReplacements);
-      System.out.println("**************************************************\n");
+      LOG.debug("Total replacements made: {}", totalReplacements);
+      LOG.debug("**************************************************\n");
 
       return new OptimizationResult(sqlQueries, materializedViews, rewrittenQueries, commonSubexpressions);
 
     } catch (Exception e) {
-      System.err.println("\n!!! OPTIMIZATION FAILED !!!");
-      e.printStackTrace();
+      LOG.error("!!! OPTIMIZATION FAILED !!!", e);
       throw new RuntimeException("Failed to optimize queries", e);
     }
   }

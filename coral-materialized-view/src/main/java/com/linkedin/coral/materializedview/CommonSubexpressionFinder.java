@@ -8,6 +8,8 @@ package com.linkedin.coral.materializedview;
 import java.util.*;
 
 import org.apache.calcite.plan.RelOptUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.Aggregate;
@@ -16,42 +18,14 @@ import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.rex.RexNode;
 
 
 public class CommonSubexpressionFinder {
 
-  /**
-   * Mode for detecting what patterns to materialize.
-   */
-  public enum PatternDetectionMode {
-    JOINS_ONLY, // Only detect Join nodes (default, most useful)
-    JOINS_AND_FILTERS, // Detect Joins and Filters with joins below
-    JOINS_AND_AGGREGATES, // Detect Joins and Aggregations
-    ALL_EXPENSIVE_OPS // Detect all expensive operations
-  }
-
-  /**
-   * Strategy for filtering nested patterns.
-   */
-  public enum NestedPatternFilterStrategy {
-    STRING_BASED, // Use string containment
-    HASH_BASED // Use Merkle tree hashing
-  }
-
-  private PatternDetectionMode detectionMode = PatternDetectionMode.JOINS_ONLY;
-  private NestedPatternFilterStrategy filterStrategy = NestedPatternFilterStrategy.STRING_BASED;
+  private static final Logger LOG = LoggerFactory.getLogger(CommonSubexpressionFinder.class);
 
   public CommonSubexpressionFinder() {
-    // Default: detect joins only, use string-based filtering
-  }
-
-  public CommonSubexpressionFinder(PatternDetectionMode mode) {
-    this.detectionMode = mode;
-  }
-
-  public CommonSubexpressionFinder(PatternDetectionMode mode, NestedPatternFilterStrategy filterStrategy) {
-    this.detectionMode = mode;
-    this.filterStrategy = filterStrategy;
   }
 
   /**
@@ -63,32 +37,31 @@ public class CommonSubexpressionFinder {
    * @return Map of subexpression digest to RelNode
    */
   public Map<String, SubexpressionInfo> findCommonSubexpressions(List<RelNode> queryPlans, int minOccurrences) {
-    System.out.println("\n########## COMMON SUBEXPRESSION FINDER ##########");
-    System.out.println("Analyzing " + queryPlans.size() + " queries with minOccurrences=" + minOccurrences);
+    LOG.debug("\n########## COMMON SUBEXPRESSION FINDER ##########");
+    LOG.debug("Analyzing {} queries with minOccurrences={}", queryPlans.size(), minOccurrences);
 
     // Map to track occurrence count of each subexpression
     Map<String, SubexpressionInfo> subexpressionMap = new HashMap<>();
 
     // Visit each query plan and collect subexpressions
     for (int queryIdx = 0; queryIdx < queryPlans.size(); queryIdx++) {
-      System.out.println("\n=== Processing Query " + queryIdx + " ===");
+      LOG.debug("\n=== Processing Query {} ===", queryIdx);
       RelNode queryPlan = queryPlans.get(queryIdx);
       collectSubexpressions(queryPlan, subexpressionMap, queryIdx);
     }
 
-    System.out.println("\n=== All Subexpressions Found ===");
-    System.out.println("Total unique subexpressions: " + subexpressionMap.size());
+    LOG.debug("\n=== All Subexpressions Found ===");
+    LOG.debug("Total unique subexpressions: {}", subexpressionMap.size());
     int idx = 0;
     for (Map.Entry<String, SubexpressionInfo> entry : subexpressionMap.entrySet()) {
       idx++;
       SubexpressionInfo info = entry.getValue();
-      System.out.println("\nSubexpression " + idx + ":");
-      System.out.println("  Occurrence count: " + info.getOccurrenceCount());
-      System.out.println("  Queries: " + info.getQueryIndices());
-      System.out.println("  Digest hash: " + info.getDigest().hashCode());
-      System.out.println("  Digest length: " + info.getDigest().length());
-      System.out
-          .println("  Digest preview: " + info.getDigest().substring(0, Math.min(200, info.getDigest().length())));
+      LOG.debug("\nSubexpression {}:", idx);
+      LOG.debug("  Occurrence count: {}", info.getOccurrenceCount());
+      LOG.debug("  Queries: {}", info.getQueryIndices());
+      LOG.debug("  Digest hash: {}", info.getDigest().hashCode());
+      LOG.debug("  Digest length: {}", info.getDigest().length());
+      LOG.debug("  Digest preview: {}", info.getDigest().substring(0, Math.min(200, info.getDigest().length())));
     }
 
     // Filter to only include subexpressions that occur at least minOccurrences times
@@ -99,25 +72,35 @@ public class CommonSubexpressionFinder {
       }
     }
 
-    System.out.println("\n=== Common Subexpressions (>= " + minOccurrences + " occurrences) ===");
-    System.out.println("Count: " + commonSubexpressions.size());
+    LOG.debug("\n=== Common Subexpressions (>= {} occurrences) ===", minOccurrences);
+    LOG.debug("Count: {}", commonSubexpressions.size());
+
+    // IMPORTANT: Apply filter subsumption to commonSubexpressions
+    // This merges patterns with related filters (e.g., "a>3" with "a>5" if both exist)
+    // Also handles patterns with <minOccurrences IF they can be merged with patterns that do pass
+    LOG.debug("\n=== Filter Subsumption Analysis ===");
+    commonSubexpressions = applyFilterSubsumptionWithMinOccurrences(
+        subexpressionMap, commonSubexpressions, minOccurrences);
+
+    LOG.debug("\n=== Common Subexpressions (>= {} occurrences) ===", minOccurrences);
+    LOG.debug("Count: {}", commonSubexpressions.size());
     for (Map.Entry<String, SubexpressionInfo> entry : commonSubexpressions.entrySet()) {
       SubexpressionInfo info = entry.getValue();
-      System.out.println("\nCommon pattern:");
-      System.out.println("  Occurrence count: " + info.getOccurrenceCount());
-      System.out.println("  Queries: " + info.getQueryIndices());
-      System.out.println("  Full digest:");
-      System.out.println(info.getDigest());
+      LOG.debug("\nCommon pattern:");
+      LOG.debug("  Occurrence count: {}", info.getOccurrenceCount());
+      LOG.debug("  Queries: {}", info.getQueryIndices());
+      LOG.debug("  Full digest:");
+      LOG.debug("{}", info.getDigest());
     }
 
     // For aggregation patterns with the same core, pick the most general one as representative
-    System.out.println("\n=== Updating Representatives for Aggregation Patterns ===");
+    LOG.debug("\n=== Updating Representatives for Aggregation Patterns ===");
     for (Map.Entry<String, SubexpressionInfo> entry : commonSubexpressions.entrySet()) {
       SubexpressionInfo info = entry.getValue();
       if (isAggregationPattern(info.getRepresentativeNode())) {
         RelNode mostGeneral = findMostGeneralNode(info);
         if (mostGeneral != info.getRepresentativeNode()) {
-          System.out.println("Updated representative to most general variant (fewer filters)");
+          LOG.debug("Updated representative to most general variant (fewer filters)");
           info.setRepresentativeNode(mostGeneral);
         }
       }
@@ -127,9 +110,7 @@ public class CommonSubexpressionFinder {
     // Strategy depends on pattern type:
     // - Join patterns: Keep largest (A JOIN B JOIN C > A JOIN B)
     // - Aggregation patterns: Keep most general (fewer filters = more reusable)
-    System.out.println("\n=== Filtering Nested Patterns ===");
-    System.out.println("Strategy: " + filterStrategy);
-    System.out.println("Detection Mode: " + detectionMode);
+    LOG.debug("\n=== Filtering Nested Patterns ===");
 
     Map<String, SubexpressionInfo> filteredSubexpressions;
 
@@ -146,28 +127,17 @@ public class CommonSubexpressionFinder {
       }
     }
 
-    System.out.println(
-        "Found " + joinPatterns.size() + " join patterns and " + aggregationPatterns.size() + " aggregation patterns");
+    LOG.debug("Found {} join patterns and {} aggregation patterns", joinPatterns.size(), aggregationPatterns.size());
 
-    // Filter join patterns (existing logic - keep largest)
-    Map<String, SubexpressionInfo> filteredJoins;
-    if (filterStrategy == NestedPatternFilterStrategy.HASH_BASED) {
-      filteredJoins = filterNestedPatternsWithHashing(joinPatterns);
-    } else {
-      filteredJoins = filterNestedPatterns(joinPatterns);
-    }
+    // Filter join patterns - always use hash-based filtering (keep largest)
+    Map<String, SubexpressionInfo> filteredJoins = filterNestedPatternsWithHashing(joinPatterns);
 
-    // Filter aggregation patterns (new logic - keep most general)
-    Map<String, SubexpressionInfo> filteredAggregations;
-    if (filterStrategy == NestedPatternFilterStrategy.HASH_BASED) {
-      filteredAggregations = filterAggregationPatternsWithHashing(aggregationPatterns);
-    } else {
-      filteredAggregations = filterAggregationPatterns(aggregationPatterns);
-    }
+    // Filter aggregation patterns - always use hash-based filtering (keep most general)
+    Map<String, SubexpressionInfo> filteredAggregations = filterAggregationPatternsWithHashing(aggregationPatterns);
 
     // CROSS-TYPE FILTERING: Remove join patterns that are nested inside aggregation patterns
     // When we have both "A JOIN B" and "A JOIN B GROUP BY country", keep only the aggregation
-    System.out.println("\n=== Cross-Type Nested Pattern Filtering ===");
+    LOG.debug("\n=== Cross-Type Nested Pattern Filtering ===");
     Map<String, SubexpressionInfo> finalFilteredJoins =
         filterJoinsNestedInAggregations(filteredJoins, filteredAggregations);
 
@@ -176,10 +146,10 @@ public class CommonSubexpressionFinder {
     filteredSubexpressions.putAll(finalFilteredJoins);
     filteredSubexpressions.putAll(filteredAggregations);
 
-    System.out.println("Patterns after filtering: " + filteredSubexpressions.size());
-    System.out.println("  Join patterns: " + finalFilteredJoins.size());
-    System.out.println("  Aggregation patterns: " + filteredAggregations.size());
-    System.out.println("##################################################\n");
+    LOG.debug("Patterns after filtering: {}", filteredSubexpressions.size());
+    LOG.debug("  Join patterns: {}", finalFilteredJoins.size());
+    LOG.debug("  Aggregation patterns: {}", filteredAggregations.size());
+    LOG.debug("##################################################\n");
 
     return filteredSubexpressions;
   }
@@ -188,7 +158,7 @@ public class CommonSubexpressionFinder {
    * Collect subexpressions from a query plan using a visitor pattern.
    */
   private void collectSubexpressions(RelNode node, Map<String, SubexpressionInfo> subexpressionMap, int queryIdx) {
-    SubexpressionCollector collector = new SubexpressionCollector(subexpressionMap, queryIdx, detectionMode);
+    SubexpressionCollector collector = new SubexpressionCollector(subexpressionMap, queryIdx);
     collector.go(node);
   }
 
@@ -199,29 +169,27 @@ public class CommonSubexpressionFinder {
   private static class SubexpressionCollector extends RelVisitor {
     private final Map<String, SubexpressionInfo> subexpressionMap;
     private final int queryIdx;
-    private final PatternDetectionMode mode;
 
-    SubexpressionCollector(Map<String, SubexpressionInfo> subexpressionMap, int queryIdx, PatternDetectionMode mode) {
+    SubexpressionCollector(Map<String, SubexpressionInfo> subexpressionMap, int queryIdx) {
       this.subexpressionMap = subexpressionMap;
       this.queryIdx = queryIdx;
-      this.mode = mode;
     }
 
     @Override
     public void visit(RelNode node, int ordinal, RelNode parent) {
       // Record this node as a potential subexpression if it's interesting
       if (isInterestingSubexpression(node)) {
-        System.out.println("  Found interesting node: " + node.getClass().getSimpleName());
+        LOG.debug("  Found interesting node: {}", node.getClass().getSimpleName());
         String digest = computeDigest(node);
-        System.out.println("    Digest hash: " + digest.hashCode());
-        System.out.println("    Digest length: " + digest.length());
+        LOG.debug("    Digest hash: {}", digest.hashCode());
+        LOG.debug("    Digest length: {}", digest.length());
 
         SubexpressionInfo info = subexpressionMap.computeIfAbsent(digest, d -> {
-          System.out.println("    -> NEW subexpression pattern");
+          LOG.debug("    -> NEW subexpression pattern");
           return new SubexpressionInfo(node, d);
         });
         info.addOccurrence(queryIdx, node);
-        System.out.println("    -> Occurrence count now: " + info.getOccurrenceCount());
+        LOG.debug("    -> Occurrence count now: {}", info.getOccurrenceCount());
       }
       // Continue traversing
       super.visit(node, ordinal, parent);
@@ -229,82 +197,35 @@ public class CommonSubexpressionFinder {
 
     /**
      * Determine if a node represents an interesting subexpression.
-     *
      * GENERIC PATTERN DETECTION:
-     * This method detects patterns based on the configured mode. The structural comparison
+     * This method detects patterns. The structural comparison
      * (digest matching) ensures we only materialize truly identical patterns regardless of:
      * - Table names (works with ANY tables: A, B, C, users, orders, products, etc.)
      * - Join types (INNER, LEFT, RIGHT, FULL OUTER, SEMI, ANTI)
      * - Join conditions (any ON clause)
      * - Number of tables (2-table, 3-table, 10-table joins)
      * - Nesting structure (simple or complex join trees)
-     *
      * The key to genericity: We use Calcite's abstract classes and structural comparison,
      * NOT hardcoded patterns or specific table/column names.
      */
     private boolean isInterestingSubexpression(RelNode node) {
-      switch (mode) {
-        case JOINS_ONLY:
-          // Default mode: Detect ALL join types
-          // Calcite's Join class is abstract and covers: INNER, LEFT, RIGHT, FULL, SEMI, ANTI
-          if (node instanceof Join) {
-            System.out.println("    -> Join detected - Type: " + ((Join) node).getJoinType());
-            return true;
-          }
-          break;
-
-        case JOINS_AND_FILTERS:
-          // Detect joins OR filters with joins underneath
-          if (node instanceof Join) {
-            System.out.println("    -> Join detected - Type: " + ((Join) node).getJoinType());
-            return true;
-          }
-          if (node instanceof Filter && hasJoinBelow(node)) {
-            System.out.println("    -> Filter with join below detected");
-            return true;
-          }
-          break;
-
-        case JOINS_AND_AGGREGATES:
-          // Detect joins OR aggregations (including Filter/Project on top of Aggregate)
-          if (node instanceof Join) {
-            System.out.println("    -> Join detected - Type: " + ((Join) node).getJoinType());
-            return true;
-          }
-          if (node instanceof Aggregate) {
-            System.out.println("    -> Aggregate detected");
-            return true;
-          }
-          // Also detect Filter/Project with Aggregate below (to capture full aggregation pattern)
-          if (node instanceof Filter && hasAggregateBelow(node)) {
-            System.out.println("    -> Filter with Aggregate below detected");
-            return true;
-          }
-          if (node instanceof Project && hasAggregateBelow(node)) {
-            System.out.println("    -> Project with Aggregate below detected");
-            return true;
-          }
-          break;
-
-        case ALL_EXPENSIVE_OPS:
-          // Detect all expensive operations
-          if (node instanceof Join) {
-            System.out.println("    -> Join detected - Type: " + ((Join) node).getJoinType());
-            return true;
-          }
-          if (node instanceof Aggregate) {
-            System.out.println("    -> Aggregate detected");
-            return true;
-          }
-          if (node instanceof Filter && hasJoinBelow(node)) {
-            System.out.println("    -> Filter with join below detected");
-            return true;
-          }
-          if (node instanceof Project && hasJoinBelow(node)) {
-            System.out.println("    -> Project with join below detected");
-            return true;
-          }
-          break;
+      // Detect joins OR aggregations (including Filter/Project on top of Aggregate)
+      if (node instanceof Join) {
+        LOG.debug("    -> Join detected - Type: {}", ((Join) node).getJoinType());
+        return true;
+      }
+      if (node instanceof Aggregate) {
+        LOG.debug("    -> Aggregate detected");
+        return true;
+      }
+      // Also detect Filter/Project with Aggregate below (to capture full aggregation pattern)
+      if (node instanceof Filter && hasAggregateBelow(node)) {
+        LOG.debug("    -> Filter with Aggregate below detected");
+        return true;
+      }
+      if (node instanceof Project && hasAggregateBelow(node)) {
+        LOG.debug("    -> Project with Aggregate below detected");
+        return true;
       }
 
       return false;
@@ -370,14 +291,26 @@ public class CommonSubexpressionFinder {
      * Compute a digest (string representation) of a RelNode for comparison.
      * Uses the explain string with implementation details.
      *
-     * For aggregation patterns, computes a consistent "core digest" based on
-     * GROUP BY + aggregates + input structure, excluding WHERE filters.
+     * HYBRID STRATEGY:
+     * - Aggregations on joins: Filter-agnostic digest (excludes WHERE clauses)
+     * - Single-table aggregations: Exact digest (includes WHERE clauses)
+     * - Other patterns: Exact digest
      */
     private String computeDigest(RelNode node) {
       // Strip Sort (ORDER BY, LIMIT) nodes - they don't affect aggregation results
       RelNode coreNode = stripSort(node);
 
-      // Use exact matching for everything else (includes filters, joins, aggregations)
+      // Check if this is an aggregation pattern
+      boolean isAggregation = (coreNode instanceof Aggregate) ||
+                              (coreNode instanceof Filter && hasAggregateBelow(coreNode)) ||
+                              (coreNode instanceof Project && hasAggregateBelow(coreNode));
+
+      if (isAggregation) {
+        // Use filter-agnostic matching for aggregations on joins
+        return computeAggregationCoreDigest(coreNode);
+      }
+
+      // Use exact matching for non-aggregation patterns (joins, filters)
       return RelOptUtil.toString(coreNode);
     }
 
@@ -426,7 +359,7 @@ public class CommonSubexpressionFinder {
         // CASE 1: Aggregation on JOIN → Filter-agnostic matching
         // Build core digest: Aggregate structure + input without filters
         // This allows queries with different WHERE clauses to share the same MV!
-        System.out.println("      Aggregation on JOIN detected → Filter-agnostic matching");
+        LOG.debug("      Aggregation on JOIN detected → Filter-agnostic matching");
 
         StringBuilder coreDigest = new StringBuilder();
         coreDigest.append("AggregationCore[");
@@ -439,7 +372,7 @@ public class CommonSubexpressionFinder {
       } else {
         // CASE 2: Single-table aggregation → Exact matching
         // Use full digest including filters for safety
-        System.out.println("      Single-table aggregation detected → Exact matching");
+        LOG.debug("      Single-table aggregation detected → Exact matching");
         return RelOptUtil.toString(node);
       }
     }
@@ -515,66 +448,6 @@ public class CommonSubexpressionFinder {
     }
   }
 
-  /**
-   * Filter out nested patterns - keep only the largest patterns.
-   * If pattern A is a subtree of pattern B, and both are common, only keep B.
-   *
-   * Example: If we have both "A JOIN B" and "A JOIN B JOIN C" as common patterns,
-   * we only want to materialize "A JOIN B JOIN C" since it includes the smaller pattern.
-   *
-   * @param commonSubexpressions All common subexpressions found
-   * @return Filtered map with nested patterns removed
-   */
-  private Map<String, SubexpressionInfo> filterNestedPatterns(Map<String, SubexpressionInfo> commonSubexpressions) {
-    if (commonSubexpressions.size() <= 1) {
-      // Nothing to filter if we have 0 or 1 pattern
-      return commonSubexpressions;
-    }
-
-    System.out.println("Checking for nested patterns...");
-    Map<String, SubexpressionInfo> filtered = new HashMap<>(commonSubexpressions);
-
-    // Compare each pattern with every other pattern
-    List<Map.Entry<String, SubexpressionInfo>> entries = new ArrayList<>(commonSubexpressions.entrySet());
-
-    for (int i = 0; i < entries.size(); i++) {
-      Map.Entry<String, SubexpressionInfo> entry1 = entries.get(i);
-      String digest1 = entry1.getKey();
-      SubexpressionInfo info1 = entry1.getValue();
-
-      for (int j = 0; j < entries.size(); j++) {
-        if (i == j) {
-          continue; // Skip comparing with itself
-        }
-
-        Map.Entry<String, SubexpressionInfo> entry2 = entries.get(j);
-        String digest2 = entry2.getKey();
-        SubexpressionInfo info2 = entry2.getValue();
-
-        // Check if digest1 is contained within digest2
-        // This indicates pattern1 is a subtree of pattern2
-        if (digest2.contains(digest1) && !digest1.equals(digest2)) {
-          System.out.println("  NESTED PATTERN DETECTED:");
-          System.out.println("    Smaller pattern (will be removed):");
-          System.out.println("      Digest length: " + digest1.length());
-          System.out.println("      Digest preview: " + digest1.substring(0, Math.min(150, digest1.length())));
-          System.out.println("    Larger pattern (will be kept):");
-          System.out.println("      Digest length: " + digest2.length());
-          System.out.println("      Digest preview: " + digest2.substring(0, Math.min(150, digest2.length())));
-
-          // Remove the smaller pattern
-          filtered.remove(digest1);
-          break; // No need to check further for this pattern
-        }
-      }
-    }
-
-    System.out.println("Nested pattern filtering complete.");
-    System.out.println("  Before filtering: " + commonSubexpressions.size() + " patterns");
-    System.out.println("  After filtering: " + filtered.size() + " patterns");
-
-    return filtered;
-  }
 
   /**
    * Hash-based nested pattern filtering using Merkle tree concepts.
@@ -594,7 +467,7 @@ public class CommonSubexpressionFinder {
       return commonSubexpressions;
     }
 
-    System.out.println("Building pattern fingerprints (Merkle tree hashing)...");
+    LOG.debug("Building pattern fingerprints (Merkle tree hashing)...");
     long startTime = System.nanoTime();
 
     // Step 1: Build fingerprints for each pattern
@@ -605,10 +478,10 @@ public class CommonSubexpressionFinder {
       PatternFingerprint fp = new PatternFingerprint(node, digest);
       fingerprints.put(digest, fp);
 
-      System.out.println("  Pattern fingerprint built:");
-      System.out.println("    Node count: " + fp.nodeCount);
-      System.out.println("    Unique subtrees: " + fp.subtreeDigestHashes.size());
-      System.out.println("    Root hash: " + fp.rootHash);
+      LOG.debug("  Pattern fingerprint built:");
+      LOG.debug("    Node count: {}", fp.nodeCount);
+      LOG.debug("    Unique subtrees: {}", fp.subtreeDigestHashes.size());
+      LOG.debug("    Root hash: {}", fp.rootHash);
     }
 
     // Step 2: Check for containment using hash sets
@@ -626,13 +499,13 @@ public class CommonSubexpressionFinder {
 
         // Check if fp1 is contained in fp2
         if (isContainedInHash(fp1, fp2, digest1, digest2)) {
-          System.out.println("  NESTED PATTERN DETECTED (via hashing):");
-          System.out.println("    Smaller pattern (will be removed):");
-          System.out.println("      Nodes: " + fp1.nodeCount + ", Subtrees: " + fp1.subtreeDigestHashes.size());
-          System.out.println("      Root hash: " + fp1.rootHash);
-          System.out.println("    Larger pattern (will be kept):");
-          System.out.println("      Nodes: " + fp2.nodeCount + ", Subtrees: " + fp2.subtreeDigestHashes.size());
-          System.out.println("      Root hash: " + fp2.rootHash);
+          LOG.debug("  NESTED PATTERN DETECTED (via hashing):");
+          LOG.debug("    Smaller pattern (will be removed):");
+          LOG.debug("      Nodes: {}, Subtrees: {}", fp1.nodeCount, fp1.subtreeDigestHashes.size());
+          LOG.debug("      Root hash: {}", fp1.rootHash);
+          LOG.debug("    Larger pattern (will be kept):");
+          LOG.debug("      Nodes: {}, Subtrees: {}", fp2.nodeCount, fp2.subtreeDigestHashes.size());
+          LOG.debug("      Root hash: {}", fp2.rootHash);
 
           filtered.remove(digest1);
           break;
@@ -641,9 +514,9 @@ public class CommonSubexpressionFinder {
     }
 
     long duration = System.nanoTime() - startTime;
-    System.out.println("Hash-based filtering complete in " + (duration / 1000) + " microseconds.");
-    System.out.println("  Before filtering: " + commonSubexpressions.size() + " patterns");
-    System.out.println("  After filtering: " + filtered.size() + " patterns");
+    LOG.debug("Hash-based filtering complete in {} microseconds.", duration / 1000);
+    LOG.debug("  Before filtering: {} patterns", commonSubexpressions.size());
+    LOG.debug("  After filtering: {} patterns", filtered.size());
 
     return filtered;
   }
@@ -655,40 +528,39 @@ public class CommonSubexpressionFinder {
   private boolean isContainedInHash(PatternFingerprint smaller, PatternFingerprint larger, String digest1,
       String digest2) {
 
-    System.out.println("    Checking containment:");
-    System.out
-        .println("      Smaller: nodes=" + smaller.nodeCount + ", subtrees=" + smaller.subtreeDigestHashes.size());
-    System.out.println("      Larger:  nodes=" + larger.nodeCount + ", subtrees=" + larger.subtreeDigestHashes.size());
+    LOG.debug("    Checking containment:");
+    LOG.debug("      Smaller: nodes={}, subtrees={}", smaller.nodeCount, smaller.subtreeDigestHashes.size());
+    LOG.debug("      Larger:  nodes={}, subtrees={}", larger.nodeCount, larger.subtreeDigestHashes.size());
 
     // Quick checks to avoid expensive operations
     if (smaller.nodeCount >= larger.nodeCount) {
-      System.out.println("      -> SKIP: smaller has >= nodes than larger");
+      LOG.debug("      -> SKIP: smaller has >= nodes than larger");
       return false; // Can't contain something with same or more nodes
     }
 
     if (smaller.subtreeDigestHashes.size() > larger.subtreeDigestHashes.size()) {
-      System.out.println("      -> SKIP: smaller has more unique subtrees");
+      LOG.debug("      -> SKIP: smaller has more unique subtrees");
       return false; // Can't contain something with more unique subtrees
     }
 
     // Debug: Show which hashes are in smaller
-    System.out.println("      Smaller subtree hashes: " + smaller.subtreeDigestHashes);
-    System.out.println("      Larger subtree hashes: " + larger.subtreeDigestHashes);
+    LOG.debug("      Smaller subtree hashes: {}", smaller.subtreeDigestHashes);
+    LOG.debug("      Larger subtree hashes: {}", larger.subtreeDigestHashes);
 
     // Main containment check: All subtree digest hashes of smaller must exist in larger
     boolean hashBasedContainment = larger.subtreeDigestHashes.containsAll(smaller.subtreeDigestHashes);
 
-    System.out.println("      Hash-based containment: " + hashBasedContainment);
+    LOG.debug("      Hash-based containment: {}", hashBasedContainment);
 
     if (hashBasedContainment) {
       // The hash-based approach is reliable when using RelOptUtil.toString() digest hashes
       // String containment would fail due to indentation differences when subtrees are nested
       // Since we're using the same digest computation as pattern detection, hash matches are trustworthy
-      System.out.println("      -> Pattern IS contained (based on digest hash matching)");
+      LOG.debug("      -> Pattern IS contained (based on digest hash matching)");
       return true;
     }
 
-    System.out.println("      -> Pattern NOT contained");
+    LOG.debug("      -> Pattern NOT contained");
     return false;
   }
 
@@ -726,11 +598,10 @@ public class CommonSubexpressionFinder {
       String subtreeDigest = RelOptUtil.toString(node);
       int hash = subtreeDigest.hashCode();
 
-      System.out.println("      Collecting subtree digest hash:");
-      System.out.println("        Node type: " + node.getClass().getSimpleName());
-      System.out.println("        Digest hash: " + hash);
-      System.out
-          .println("        Digest preview: " + subtreeDigest.substring(0, Math.min(100, subtreeDigest.length())));
+      LOG.debug("      Collecting subtree digest hash:");
+      LOG.debug("        Node type: {}", node.getClass().getSimpleName());
+      LOG.debug("        Digest hash: {}", hash);
+      LOG.debug("        Digest preview: {}", subtreeDigest.substring(0, Math.min(100, subtreeDigest.length())));
 
       // Add this subtree's digest hash to the set
       hashes.add(hash);
@@ -754,6 +625,308 @@ public class CommonSubexpressionFinder {
   }
 
   /**
+   * Apply filter subsumption to group patterns that differ only in filter specificity.
+   *
+   * Generic Algorithm:
+   * 1. Separate single-table aggregations from aggregations on joins
+   * 2. For single-table aggregations, group by "core structure" (same aggregation, different filters)
+   * 3. Within each group, find the most general filter using FilterSubsumptionAnalyzer
+   * 4. Merge patterns in each group into ONE pattern with the most general filter
+   * 5. Store residual filter metadata for query rewriting
+   *
+   * Example:
+   * Input patterns:
+   * - Pattern A: WHERE exp > 5 GROUP BY location (2 queries)
+   * - Pattern B: WHERE exp > 5 AND country = 'US' GROUP BY location (1 query)
+   *
+   * Analysis:
+   * - Same core: Aggregate(GROUP BY location)
+   * - Filter A subsumes Filter B (A is more general)
+   * - Merge into ONE pattern with Filter A
+   *
+   * Output:
+   * - Pattern merged: WHERE exp > 5 GROUP BY location (3 queries)
+   * - Residual for Pattern B queries: WHERE country = 'US'
+   */
+
+  /**
+   * Apply filter subsumption considering minOccurrences threshold.
+   */
+  private Map<String, SubexpressionInfo> applyFilterSubsumptionWithMinOccurrences(
+      Map<String, SubexpressionInfo> allPatterns,
+      Map<String, SubexpressionInfo> qualifiedPatterns,
+      int minOccurrences) {
+
+    LOG.debug("Applying filter subsumption with minOccurrences={}...", minOccurrences);
+
+    // Apply subsumption to ALL patterns (including those below threshold)
+    // This allows low-occurrence patterns to be merged with high-occurrence ones
+    Map<String, SubexpressionInfo> afterSubsumption = applyFilterSubsumption(allPatterns);
+
+    // Now filter to keep only those with >= minOccurrences AFTER subsumption
+    Map<String, SubexpressionInfo> result = new HashMap<>();
+    for (Map.Entry<String, SubexpressionInfo> entry : afterSubsumption.entrySet()) {
+      if (entry.getValue().getOccurrenceCount() >= minOccurrences) {
+        result.put(entry.getKey(), entry.getValue());
+        LOG.debug("Keeping pattern with {} occurrences", entry.getValue().getOccurrenceCount());
+      } else {
+        LOG.debug("Filtering out pattern with {} occurrences (< {})",
+            entry.getValue().getOccurrenceCount(), minOccurrences);
+      }
+    }
+
+    LOG.debug("After subsumption + minOccurrences filter: {} patterns", result.size());
+    return result;
+  }
+
+  private Map<String, SubexpressionInfo> applyFilterSubsumption(Map<String, SubexpressionInfo> patterns) {
+    LOG.debug("Applying filter subsumption analysis...");
+
+    // Separate single-table aggregations (candidates for filter subsumption)
+    Map<String, SubexpressionInfo> singleTableAggs = new HashMap<>();
+    Map<String, SubexpressionInfo> otherPatterns = new HashMap<>();
+
+    for (Map.Entry<String, SubexpressionInfo> entry : patterns.entrySet()) {
+      RelNode node = entry.getValue().getRepresentativeNode();
+      if (isAggregationPattern(node) && !hasAggregationOnJoin(node)) {
+        // Single-table aggregation
+        singleTableAggs.put(entry.getKey(), entry.getValue());
+      } else {
+        // Aggregation on join, or non-aggregation pattern
+        otherPatterns.put(entry.getKey(), entry.getValue());
+      }
+    }
+
+    LOG.debug("Found {} single-table aggregations for subsumption analysis", singleTableAggs.size());
+    LOG.debug("Found {} other patterns (no subsumption)", otherPatterns.size());
+
+    if (singleTableAggs.isEmpty()) {
+      LOG.debug("No single-table aggregations to analyze");
+      return patterns;
+    }
+
+    // Group single-table aggregations by "core structure"
+    // Core = same aggregation structure (GROUP BY columns, aggregation functions) minus the filter
+    Map<String, List<Map.Entry<String, SubexpressionInfo>>> coreGroups = new HashMap<>();
+
+    for (Map.Entry<String, SubexpressionInfo> entry : singleTableAggs.entrySet()) {
+      String coreDigest = computeCoreDigestWithoutFilter(entry.getValue().getRepresentativeNode());
+      coreGroups.computeIfAbsent(coreDigest, k -> new ArrayList<>()).add(entry);
+    }
+
+    LOG.debug("Grouped into {} core structures", coreGroups.size());
+
+    // For each core group, apply filter subsumption
+    Map<String, SubexpressionInfo> mergedPatterns = new HashMap<>();
+
+    for (Map.Entry<String, List<Map.Entry<String, SubexpressionInfo>>> groupEntry : coreGroups.entrySet()) {
+      String coreDigest = groupEntry.getKey();
+      List<Map.Entry<String, SubexpressionInfo>> group = groupEntry.getValue();
+
+      LOG.debug("\nAnalyzing core group: {} patterns", group.size());
+      LOG.debug("Core digest: {}", coreDigest.substring(0, Math.min(100, coreDigest.length())));
+
+      if (group.size() == 1) {
+        // Single pattern in group - no subsumption needed
+        mergedPatterns.put(group.get(0).getKey(), group.get(0).getValue());
+        LOG.debug("Single pattern in group - no subsumption needed");
+        continue;
+      }
+
+      // Multiple patterns with same core - check for filter subsumption
+      List<RexNode> filters = new ArrayList<>();
+      List<SubexpressionInfo> infos = new ArrayList<>();
+
+      for (Map.Entry<String, SubexpressionInfo> entry : group) {
+        SubexpressionInfo info = entry.getValue();
+        RexNode filter = FilterSubsumptionAnalyzer.extractFilterFromRelNode(info.getRepresentativeNode());
+        filters.add(filter);
+        infos.add(info);
+
+        LOG.debug("Pattern {}: filter = {}, occurrences = {}",
+            entry.getKey().hashCode(), filter, info.getOccurrenceCount());
+      }
+
+      // Find the most general filter
+      RexNode mostGeneralFilter = FilterSubsumptionAnalyzer.findMostGeneralFilter(filters);
+      LOG.debug("Most general filter: {}", mostGeneralFilter);
+
+      // Find the pattern with the most general filter (or pick first if tied)
+      SubexpressionInfo chosenInfo = null;
+      int chosenIndex = -1;
+      for (int i = 0; i < filters.size(); i++) {
+        RexNode filter = filters.get(i);
+        if ((mostGeneralFilter == null && filter == null) ||
+            (mostGeneralFilter != null && filter != null &&
+             mostGeneralFilter.toString().equals(filter.toString()))) {
+          chosenInfo = infos.get(i);
+          chosenIndex = i;
+          break;
+        }
+      }
+
+      if (chosenInfo == null) {
+        // Fallback: pick the one with most occurrences
+        chosenInfo = infos.get(0);
+        chosenIndex = 0;
+        for (int i = 1; i < infos.size(); i++) {
+          if (infos.get(i).getOccurrenceCount() > chosenInfo.getOccurrenceCount()) {
+            chosenInfo = infos.get(i);
+            chosenIndex = i;
+          }
+        }
+      }
+
+      LOG.debug("Chosen pattern index: {}", chosenIndex);
+
+      // Merge all patterns into the chosen one
+      SubexpressionInfo mergedInfo = new SubexpressionInfo(
+          chosenInfo.getRepresentativeNode(),
+          chosenInfo.getDigest()
+      );
+
+      // Add all occurrences from all patterns in the group
+      for (SubexpressionInfo info : infos) {
+        for (Map.Entry<Integer, List<RelNode>> occEntry : info.getOccurrenceMap().entrySet()) {
+          for (RelNode node : occEntry.getValue()) {
+            mergedInfo.addOccurrence(occEntry.getKey(), node);
+          }
+        }
+      }
+
+      LOG.debug("Merged pattern has {} total occurrences", mergedInfo.getOccurrenceCount());
+
+      // CRITICAL FIX: Keep ALL original keys pointing to the merged pattern
+      // This allows both Q1 (WHERE a > 5) and Q2 (WHERE a > 5 AND b = 'test')
+      // to find their patterns in the map, even though they're merged
+      LOG.debug("\n=== KEEPING ALL {} KEYS FOR MERGED PATTERN ===", group.size());
+      for (Map.Entry<String, SubexpressionInfo> entry : group) {
+        String originalKey = entry.getKey();
+        SubexpressionInfo originalInfo = entry.getValue();
+        mergedPatterns.put(originalKey, mergedInfo);
+        LOG.debug("\nKey #{} (hash: {}):", group.indexOf(entry) + 1, originalKey.hashCode());
+        LOG.debug("  Original occurrences: {}", originalInfo.getOccurrenceCount());
+        LOG.debug("  Query indices: {}", originalInfo.getQueryIndices());
+        LOG.debug("  Key preview: {}...", originalKey.substring(0, Math.min(150, originalKey.length())));
+      }
+      LOG.debug("All {} keys now point to merged pattern with {} total occurrences\n",
+          group.size(), mergedInfo.getOccurrenceCount());
+    }
+
+    // Combine merged patterns with other patterns
+    Map<String, SubexpressionInfo> result = new HashMap<>();
+    result.putAll(otherPatterns);
+    result.putAll(mergedPatterns);
+
+    LOG.debug("After filter subsumption: {} patterns (was {})", result.size(), patterns.size());
+
+    return result;
+  }
+
+  /**
+   * Compute core digest without filter (for grouping patterns by structure).
+   *
+   * Strips the filter from the pattern and computes digest of the remaining structure.
+   * This allows grouping patterns that differ only in WHERE clause.
+   *
+   * @param node The aggregation pattern
+   * @return Digest of the core structure (aggregation + input, no filter)
+   */
+  private String computeCoreDigestWithoutFilter(RelNode node) {
+    // Strip sort first
+    RelNode coreNode = stripSort(node);
+
+    // If the node itself is an Aggregate, get its structure without the input filter
+    if (coreNode instanceof Aggregate) {
+      Aggregate agg = (Aggregate) coreNode;
+      RelNode input = agg.getInput();
+
+      // Skip filter in input
+      RelNode inputWithoutFilter = input;
+      if (input instanceof Filter) {
+        inputWithoutFilter = input.getInput(0);
+      }
+
+      // Build core digest: Aggregate structure + input structure (no filter)
+      StringBuilder digest = new StringBuilder();
+      digest.append("AggregateCore[");
+      digest.append("groupSet=").append(agg.getGroupSet());
+      digest.append(", aggCalls=").append(agg.getAggCallList());
+      digest.append(", inputType=").append(inputWithoutFilter.getRowType().getFieldNames());
+      digest.append("]");
+
+      return digest.toString();
+    }
+
+    // Fallback: use full digest
+    return RelOptUtil.toString(coreNode);
+  }
+
+  /**
+   * Strip Sort nodes (ORDER BY, LIMIT) from the top of the tree.
+   * These don't affect aggregation results and can be applied after reading MV.
+   */
+  private static RelNode stripSort(RelNode node) {
+    if (node instanceof Sort) {
+      return stripSort(node.getInput(0));
+    }
+    return node;
+  }
+
+  /**
+   * Helper to check if a node has joins in its subtree.
+   */
+  private static boolean hasJoinBelow(RelNode node) {
+    // Check immediate children
+    for (RelNode input : node.getInputs()) {
+      if (input instanceof Join) {
+        return true;
+      }
+      // Recursively check deeper (but limit depth to avoid excessive checking)
+      if (hasJoinBelowRecursive(input, 3)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Recursive helper with depth limit for hasJoinBelow.
+   */
+  private static boolean hasJoinBelowRecursive(RelNode node, int maxDepth) {
+    if (maxDepth <= 0) {
+      return false;
+    }
+    if (node instanceof Join) {
+      return true;
+    }
+    for (RelNode input : node.getInputs()) {
+      if (hasJoinBelowRecursive(input, maxDepth - 1)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Check if a pattern is an aggregation on a join (not single-table).
+   */
+  private boolean hasAggregationOnJoin(RelNode node) {
+    if (node instanceof Aggregate) {
+      return hasJoinBelow(node);
+    }
+
+    // Check through wrappers
+    for (RelNode child : node.getInputs()) {
+      if (child instanceof Aggregate) {
+        return hasJoinBelow(child);
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Determine if a pattern is an aggregation pattern.
    * An aggregation pattern has Aggregate as the top node or near the top (with Filter/Project on top).
    */
@@ -772,7 +945,7 @@ public class CommonSubexpressionFinder {
       return joinPatterns;
     }
 
-    System.out.println("Checking for join patterns nested in aggregations...");
+    LOG.debug("Checking for join patterns nested in aggregations...");
     Map<String, SubexpressionInfo> result = new HashMap<>(joinPatterns);
 
     // For each aggregation pattern, check if its input matches a join pattern
@@ -801,12 +974,11 @@ public class CommonSubexpressionFinder {
 
             // Compare the aggregation's input digest with the join pattern's stored digest (map key)
             if (joinInputDigest.equals(joinDigest)) {
-              System.out.println("  Found join pattern nested in aggregation:");
-              System.out
-                  .println("    Join digest: " + joinDigest.substring(0, Math.min(100, joinDigest.length())) + "...");
-              System.out.println("    Aggregation digest: "
-                  + aggEntry.getKey().substring(0, Math.min(100, aggEntry.getKey().length())) + "...");
-              System.out.println("    -> Removing join pattern (keeping aggregation)");
+              LOG.debug("  Found join pattern nested in aggregation:");
+              LOG.debug("    Join digest: {}...", joinDigest.substring(0, Math.min(100, joinDigest.length())));
+              LOG.debug("    Aggregation digest: {}...",
+                  aggEntry.getKey().substring(0, Math.min(100, aggEntry.getKey().length())));
+              LOG.debug("    -> Removing join pattern (keeping aggregation)");
               result.remove(joinDigest);
             }
           }
@@ -814,8 +986,8 @@ public class CommonSubexpressionFinder {
       }
     }
 
-    System.out.println("Joins after cross-type filtering: " + result.size() + " (removed "
-        + (joinPatterns.size() - result.size()) + ")");
+    LOG.debug("Joins after cross-type filtering: {} (removed {})", result.size(),
+        (joinPatterns.size() - result.size()));
     return result;
   }
 
@@ -857,71 +1029,10 @@ public class CommonSubexpressionFinder {
       }
     }
 
-    System.out.println(
-        "  Found most general variant with " + minFilters + " filters (out of " + allNodes.size() + " variants)");
+    LOG.debug("  Found most general variant with {} filters (out of {} variants)", minFilters, allNodes.size());
     return mostGeneral;
   }
 
-  /**
-   * Filter aggregation patterns using string-based approach.
-   * For aggregations, we keep the MOST GENERAL pattern (fewest filters/conditions).
-   * More general = more reusable across different queries.
-   */
-  private Map<String, SubexpressionInfo> filterAggregationPatterns(Map<String, SubexpressionInfo> aggregationPatterns) {
-
-    if (aggregationPatterns.size() <= 1) {
-      return aggregationPatterns;
-    }
-
-    System.out.println("Filtering aggregation patterns (STRING_BASED)...");
-    Map<String, SubexpressionInfo> filtered = new HashMap<>(aggregationPatterns);
-
-    List<Map.Entry<String, SubexpressionInfo>> entries = new ArrayList<>(aggregationPatterns.entrySet());
-
-    for (int i = 0; i < entries.size(); i++) {
-      Map.Entry<String, SubexpressionInfo> entry1 = entries.get(i);
-      String digest1 = entry1.getKey();
-      RelNode node1 = entry1.getValue().getRepresentativeNode();
-
-      for (int j = 0; j < entries.size(); j++) {
-        if (i == j) {
-          continue;
-        }
-
-        Map.Entry<String, SubexpressionInfo> entry2 = entries.get(j);
-        String digest2 = entry2.getKey();
-        RelNode node2 = entry2.getValue().getRepresentativeNode();
-
-        // Check if they have the same aggregation core (same GROUP BY, same aggregates)
-        if (haveSameAggregationCore(digest1, digest2)) {
-          // Count filters to determine which is more general
-          int filters1 = countFiltersInPattern(node1);
-          int filters2 = countFiltersInPattern(node2);
-
-          System.out.println("  Found related aggregation patterns:");
-          System.out.println("    Pattern 1: " + filters1 + " filters");
-          System.out.println("    Pattern 2: " + filters2 + " filters");
-
-          // Keep the one with FEWER filters (more general)
-          if (filters1 < filters2) {
-            System.out.println("    -> Keeping Pattern 1 (more general)");
-            filtered.remove(digest2);
-          } else if (filters2 < filters1) {
-            System.out.println("    -> Keeping Pattern 2 (more general)");
-            filtered.remove(digest1);
-            break; // Pattern 1 is removed, move to next
-          }
-          // If equal filters, keep both (different enough to be useful)
-        }
-      }
-    }
-
-    System.out.println("Aggregation pattern filtering complete (STRING_BASED).");
-    System.out.println("  Before: " + aggregationPatterns.size() + " patterns");
-    System.out.println("  After: " + filtered.size() + " patterns");
-
-    return filtered;
-  }
 
   /**
    * Filter aggregation patterns using hash-based approach.
@@ -941,7 +1052,7 @@ public class CommonSubexpressionFinder {
       return aggregationPatterns;
     }
 
-    System.out.println("Filtering aggregation patterns (HASH_BASED)...");
+    LOG.debug("Filtering aggregation patterns (HASH_BASED)...");
     long startTime = System.nanoTime();
 
     Map<String, SubexpressionInfo> filtered = new HashMap<>(aggregationPatterns);
@@ -970,16 +1081,16 @@ public class CommonSubexpressionFinder {
 
         // Check if they have the same aggregation core (including filters now!)
         if (fp1.aggregationCoreHash == fp2.aggregationCoreHash) {
-          System.out.println("  Found related aggregation patterns:");
-          System.out.println("    Pattern 1: " + fp1.filterCount + " filters, core hash: " + fp1.aggregationCoreHash);
-          System.out.println("    Pattern 2: " + fp2.filterCount + " filters, core hash: " + fp2.aggregationCoreHash);
+          LOG.debug("  Found related aggregation patterns:");
+          LOG.debug("    Pattern 1: {} filters, core hash: {}", fp1.filterCount, fp1.aggregationCoreHash);
+          LOG.debug("    Pattern 2: {} filters, core hash: {}", fp2.filterCount, fp2.aggregationCoreHash);
 
           // Keep the one with FEWER filters (more general)
           if (fp1.filterCount < fp2.filterCount) {
-            System.out.println("    -> Keeping Pattern 1 (more general)");
+            LOG.debug("    -> Keeping Pattern 1 (more general)");
             filtered.remove(digest2);
           } else if (fp2.filterCount < fp1.filterCount) {
-            System.out.println("    -> Keeping Pattern 2 (more general)");
+            LOG.debug("    -> Keeping Pattern 2 (more general)");
             filtered.remove(digest1);
             break; // Pattern 1 is removed, move to next
           }
@@ -989,57 +1100,13 @@ public class CommonSubexpressionFinder {
     }
 
     long duration = System.nanoTime() - startTime;
-    System.out
-        .println("Aggregation pattern filtering complete (HASH_BASED) in " + (duration / 1000) + " microseconds.");
-    System.out.println("  Before: " + aggregationPatterns.size() + " patterns");
-    System.out.println("  After: " + filtered.size() + " patterns");
+    LOG.debug("Aggregation pattern filtering complete (HASH_BASED) in {} microseconds.", duration / 1000);
+    LOG.debug("  Before: {} patterns", aggregationPatterns.size());
+    LOG.debug("  After: {} patterns", filtered.size());
 
     return filtered;
   }
 
-  /**
-   * Check if two patterns have the same aggregation core.
-   * Same core means: same tables, same joins (if any), same GROUP BY columns, same aggregates.
-   * Different filters/WHERE clauses are OK - that's what makes one more general than another.
-   */
-  private boolean haveSameAggregationCore(String digest1, String digest2) {
-    // Extract the aggregation part (before filters are applied)
-    // For now, use a simple heuristic: if one digest contains most of the other's structure
-    // A more robust approach would parse the Aggregate node's group set and agg functions
-
-    // Remove filter-related parts for comparison
-    String core1 = extractAggregationCore(digest1);
-    String core2 = extractAggregationCore(digest2);
-
-    // Check if cores are similar (allowing for minor differences in filters)
-    return core1.equals(core2);
-  }
-
-  /**
-   * Extract the aggregation core from a digest by removing filter-specific parts.
-   */
-  private String extractAggregationCore(String digest) {
-    // Find the Aggregate node and extract its definition
-    int aggStart = digest.indexOf("LogicalAggregate");
-    if (aggStart == -1) {
-      return digest; // Not an aggregate pattern
-    }
-
-    // Extract from Aggregate onwards, but stop at Filter nodes
-    int filterStart = digest.indexOf("LogicalFilter", aggStart);
-    if (filterStart != -1 && filterStart < digest.length() / 2) {
-      // Filter is near the top, extract aggregate core below it
-      return digest.substring(aggStart);
-    }
-
-    // Extract the aggregate and its inputs (joins, tables)
-    int nextNodeStart = digest.indexOf("Logical", aggStart + 10);
-    if (nextNodeStart != -1) {
-      return digest.substring(aggStart, nextNodeStart + 200); // Reasonable window
-    }
-
-    return digest.substring(aggStart);
-  }
 
   /**
    * Count the number of filters in a pattern.
@@ -1293,6 +1360,13 @@ public class CommonSubexpressionFinder {
 
     public List<RelNode> getOccurrencesInQuery(int queryIdx) {
       return occurrencesByQuery.getOrDefault(queryIdx, Collections.emptyList());
+    }
+
+    /**
+     * Get the occurrence map (queryIdx -> list of nodes).
+     */
+    public Map<Integer, List<RelNode>> getOccurrenceMap() {
+      return occurrencesByQuery;
     }
 
     /**

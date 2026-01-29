@@ -2,9 +2,12 @@ package com.linkedin.coral.materializedview;
 
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlKind;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,9 +29,13 @@ import java.util.List;
  * <p>This feature allows queries with additional filter conditions to reuse materialized views
  * by applying residual filters on top of the MV scan, dramatically improving MV reuse rates.
  *
+ * <p>This class now uses FilterSubsumptionAnalyzer for generic filter analysis.
+ *
  * @author Coral Team
  */
 public class FilterImplicationChecker {
+
+  private static final Logger LOG = LoggerFactory.getLogger(FilterImplicationChecker.class);
 
   /**
    * Result of a filter implication check.
@@ -76,80 +83,122 @@ public class FilterImplicationChecker {
   /**
    * Check if the query filter implies the target filter.
    *
-   * <p><b>Implication Logic:</b>
+   * <p><b>Subsumption Logic (using FilterSubsumptionAnalyzer):</b>
    * <ol>
-   *   <li><b>Exact Match:</b> Query filter equals target filter → No residual</li>
-   *   <li><b>Conjunction Decomposition:</b> Query = Target AND Residual → Residual filter</li>
-   *   <li><b>No Implication:</b> Otherwise → Cannot use MV</li>
+   *   <li><b>Exact Match:</b> Query filter equals MV filter → No residual</li>
+   *   <li><b>MV Filter Subsumes Query Filter:</b> MV filter is more general → Use MV with residual</li>
+   *   <li><b>No Subsumption:</b> Otherwise → Cannot use MV</li>
    * </ol>
    *
+   * <p>Examples:
+   * <ul>
+   *   <li>Query: WHERE exp > 5 AND country = 'US', MV: WHERE exp > 5 → MV subsumes query, residual = country='US'</li>
+   *   <li>Query: WHERE exp > 5, MV: WHERE exp > 5 → Exact match, no residual</li>
+   *   <li>Query: WHERE exp > 5, MV: WHERE exp > 5 AND country = 'US' → NO subsumption (MV is more restrictive)</li>
+   * </ul>
+   *
    * @param queryFilter The filter condition from the user query
-   * @param targetFilter The filter condition from the MV definition
+   * @param mvFilter The filter condition from the MV definition (called targetFilter for compatibility)
    * @param rexBuilder RexBuilder for constructing residual filter expressions
-   * @return ImplicationResult indicating if implication holds and any residual filter
+   * @return ImplicationResult indicating if MV can be used and any residual filter
    */
-  public static ImplicationResult checkImplication(RexNode queryFilter, RexNode targetFilter, RexBuilder rexBuilder) {
-    if (queryFilter == null || targetFilter == null) {
-      // If either filter is null, cannot establish implication
-      return new ImplicationResult(false, null);
-    }
+  public static ImplicationResult checkImplication(RexNode queryFilter, RexNode mvFilter, RexBuilder rexBuilder) {
+    LOG.debug("Checking filter implication:");
+    LOG.debug("  Query filter: {}", queryFilter);
+    LOG.debug("  MV filter: {}", mvFilter);
 
-    // Case 1: Exact match (string comparison for now)
-    String queryStr = queryFilter.toString();
-    String targetStr = targetFilter.toString();
-
-    if (queryStr.equals(targetStr)) {
-      // Filters are identical → exact match, no residual needed
+    // Case 1: Both null → match
+    if (queryFilter == null && mvFilter == null) {
+      LOG.debug("  Both filters null → exact match");
       return new ImplicationResult(true, null);
     }
 
-    // Case 2: Query is a conjunction (AND) that may contain target
-    if (queryFilter.getKind() == SqlKind.AND) {
-      // Decompose query filter into conjuncts
-      List<RexNode> queryConjuncts = RelOptUtil.conjunctions(queryFilter);
+    // Case 2: MV has no filter, query has filter → MV subsumes (residual = query filter)
+    if (mvFilter == null && queryFilter != null) {
+      LOG.debug("  MV has no filter, query has filter → MV subsumes, residual = query filter");
+      return new ImplicationResult(true, queryFilter);
+    }
 
-      // Check if any conjunct matches the target filter
-      for (int i = 0; i < queryConjuncts.size(); i++) {
-        RexNode conjunct = queryConjuncts.get(i);
-        if (conjunct.toString().equals(targetStr)) {
-          // Found a match! Compute residual by removing this conjunct
-          List<RexNode> residualConjuncts = new ArrayList<>(queryConjuncts);
-          residualConjuncts.remove(i);
+    // Case 3: Query has no filter, MV has filter → NO subsumption (MV is more restrictive)
+    if (queryFilter == null && mvFilter != null) {
+      LOG.debug("  Query has no filter, MV has filter → MV is more restrictive, no match");
+      return new ImplicationResult(false, null);
+    }
 
-          RexNode residualFilter;
-          if (residualConjuncts.isEmpty()) {
-            // This shouldn't happen (would be exact match), but handle safely
-            residualFilter = null;
-          } else if (residualConjuncts.size() == 1) {
-            // Single residual condition
-            residualFilter = residualConjuncts.get(0);
-          } else {
-            // Multiple residual conditions → recombine with AND
-            residualFilter = RexUtil.composeConjunction(rexBuilder, residualConjuncts);
-          }
+    // Case 4: Both have filters → check subsumption using FilterSubsumptionAnalyzer
+    // Check if MV filter subsumes query filter (MV filter is more general)
+    boolean mvSubsumesQuery = FilterSubsumptionAnalyzer.subsumes(mvFilter, queryFilter);
 
-          return new ImplicationResult(true, residualFilter);
+    if (!mvSubsumesQuery) {
+      LOG.debug("  MV filter does NOT subsume query filter → no match");
+      return new ImplicationResult(false, null);
+    }
+
+    LOG.debug("  MV filter subsumes query filter → can use MV");
+
+    // Exact match check
+    if (queryFilter.toString().equals(mvFilter.toString())) {
+      LOG.debug("  Filters are identical → exact match, no residual");
+      return new ImplicationResult(true, null);
+    }
+
+    // Compute residual filter (query filter - MV filter)
+    RexNode residualFilter = computeResidualFilter(queryFilter, mvFilter, rexBuilder);
+    LOG.debug("  Residual filter: {}", residualFilter);
+
+    return new ImplicationResult(true, residualFilter);
+  }
+
+  /**
+   * Compute the residual filter: parts of queryFilter not covered by mvFilter.
+   *
+   * @param queryFilter The query's filter
+   * @param mvFilter The MV's filter
+   * @param rexBuilder RexBuilder for constructing AND expressions
+   * @return The residual filter, or null if no residual
+   */
+  private static RexNode computeResidualFilter(RexNode queryFilter, RexNode mvFilter, RexBuilder rexBuilder) {
+    // Extract conjuncts
+    List<RexNode> queryConjuncts = FilterSubsumptionAnalyzer.extractConjuncts(queryFilter);
+    List<RexNode> mvConjuncts = FilterSubsumptionAnalyzer.extractConjuncts(mvFilter);
+
+    LOG.debug("Computing residual filter:");
+    LOG.debug("  Query conjuncts: {}", queryConjuncts.size());
+    LOG.debug("  MV conjuncts: {}", mvConjuncts.size());
+
+    // Find conjuncts in query that are NOT in MV
+    List<RexNode> residualConjuncts = new ArrayList<>();
+    for (RexNode queryConjunct : queryConjuncts) {
+      boolean foundInMv = false;
+      for (RexNode mvConjunct : mvConjuncts) {
+        if (queryConjunct.toString().equals(mvConjunct.toString())) {
+          foundInMv = true;
+          break;
         }
+      }
+      if (!foundInMv) {
+        residualConjuncts.add(queryConjunct);
+        LOG.debug("  Residual conjunct: {}", queryConjunct);
       }
     }
 
-    // Case 3: Target is a conjunction, check if query matches one part
-    // (Less common: query is subset of target)
-    if (targetFilter.getKind() == SqlKind.AND) {
-      List<RexNode> targetConjuncts = RelOptUtil.conjunctions(targetFilter);
-
-      for (RexNode targetConjunct : targetConjuncts) {
-        if (queryStr.equals(targetConjunct.toString())) {
-          // Query matches ONE part of target's AND
-          // This means query is MORE restrictive than target (query implies target)
-          // No residual needed - the MV already has the stricter filter
-          return new ImplicationResult(true, null);
-        }
+    // Build residual filter
+    if (residualConjuncts.isEmpty()) {
+      LOG.debug("  No residual conjuncts");
+      return null;
+    } else if (residualConjuncts.size() == 1) {
+      LOG.debug("  Single residual conjunct");
+      return residualConjuncts.get(0);
+    } else {
+      LOG.debug("  Multiple residual conjuncts, building AND");
+      if (rexBuilder != null) {
+        return RexUtil.composeConjunction(rexBuilder, residualConjuncts);
+      } else {
+        // Cannot construct AND without RexBuilder
+        LOG.warn("  RexBuilder is null, cannot construct AND for multiple residuals");
+        return null;
       }
     }
-
-    // Case 4: No implication found
-    return new ImplicationResult(false, null);
   }
 
   /**

@@ -41,9 +41,7 @@ public class MaterializedViewService {
 
   /**
    * Analyze a list of queries to find common patterns and generate materialized views.
-   *
    * This is Stage 1 (offline/batch) of the MV optimization system.
-   *
    * @param queries List of SQL queries to analyze
    * @param minOccurrences Minimum number of occurrences for a pattern to be considered
    * @param registry Registry to store generated MVs
@@ -54,10 +52,8 @@ public class MaterializedViewService {
       throws Exception {
 
     long startTime = System.currentTimeMillis();
-
-    // Create optimizer and run analysis (using HASH_BASED strategy)
-    MaterializedViewOptimizer optimizer = new MaterializedViewOptimizer(metastoreClient,
-        CommonSubexpressionFinder.NestedPatternFilterStrategy.HASH_BASED);
+    // Create optimizer and run analysis
+    MaterializedViewOptimizer optimizer = new MaterializedViewOptimizer(metastoreClient);
     OptimizationResult result = optimizer.optimize(queries, minOccurrences);
 
     // Store MVs in registry and build result
@@ -83,9 +79,7 @@ public class MaterializedViewService {
 
   /**
    * Rewrite a single query to use materialized views if a matching pattern is found.
-   *
    * This is Stage 2 (online/runtime) of the MV optimization system.
-   *
    * @param query SQL query to rewrite
    * @param registry Registry containing available MVs
    * @return Rewrite result indicating if rewrite occurred and the rewritten query

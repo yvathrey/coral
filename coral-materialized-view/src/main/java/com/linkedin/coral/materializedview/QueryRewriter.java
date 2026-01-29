@@ -6,7 +6,6 @@
 package com.linkedin.coral.materializedview;
 
 import java.util.*;
-
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptSchema;
 import org.apache.calcite.plan.RelOptTable;
@@ -37,14 +36,17 @@ import org.apache.calcite.sql.SqlNode;
 
 import com.linkedin.coral.hive.hive2rel.HiveToRelConverter;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 /**
  * Rewrites queries to use materialized views instead of common subexpressions.
- *
  * This uses proper RelNode tree manipulation rather than string substitution.
  */
 public class QueryRewriter {
 
+  private static final Logger LOG = LoggerFactory.getLogger(QueryRewriter.class);
   private final HiveToRelConverter hiveToRelConverter;
 
   public QueryRewriter(HiveToRelConverter hiveToRelConverter) {
@@ -53,10 +55,8 @@ public class QueryRewriter {
 
   /**
    * Rewrite a query to use materialized views.
-   *
    * This performs tree-based replacement at the RelNode level,
    * then generates rewritten SQL with MV substitutions.
-   *
    * @param originalQuery The original query RelNode
    * @param subexpressionMap Map of digest to subexpression info
    * @param materializedViews Map of digest to materialized view info
@@ -65,32 +65,28 @@ public class QueryRewriter {
   public RewriteResult rewriteQuery(RelNode originalQuery,
       Map<String, CommonSubexpressionFinder.SubexpressionInfo> subexpressionMap,
       Map<String, MaterializedViewGenerator.MaterializedViewInfo> materializedViews) {
-
-    System.out.println("\n@@@ QUERY REWRITER - START @@@");
-    System.out.println("DEBUG: Original query type: " + originalQuery.getClass().getSimpleName());
-    System.out.println("DEBUG: Number of subexpression patterns: " + subexpressionMap.size());
-    System.out.println("DEBUG: Number of materialized views: " + materializedViews.size());
-
+    LOG.debug("Original query type: {}", originalQuery.getClass().getSimpleName());
+    LOG.debug("Number of subexpression patterns: {}", subexpressionMap.size());
+    LOG.debug("Number of materialized views: {}", materializedViews.size());
     // Use tree transformer to replace matching subtrees with MV scans
-    System.out.println("DEBUG: Creating SubtreeReplacer...");
+    LOG.debug("Creating SubtreeReplacer...");
     SubtreeReplacer replacer = new SubtreeReplacer(subexpressionMap, materializedViews, hiveToRelConverter);
-
-    System.out.println("DEBUG: Starting tree traversal with replacer...");
+    LOG.debug("Starting tree traversal with replacer...");
     RelNode rewrittenQuery = originalQuery.accept(replacer);
 
-    System.out.println("DEBUG: Tree traversal complete");
-    System.out.println("DEBUG: Rewritten query type: " + rewrittenQuery.getClass().getSimpleName());
-    System.out.println("DEBUG: Total replacements made: " + replacer.getReplacementCount());
+    LOG.debug("Tree traversal complete");
+    LOG.debug("Rewritten query type: {}", rewrittenQuery.getClass().getSimpleName());
+    LOG.debug("Total replacements made: {}", replacer.getReplacementCount());
 
     boolean queryChanged = (rewrittenQuery != originalQuery);
-    System.out.println("DEBUG: Query structure changed: " + queryChanged);
+    LOG.debug("Query structure changed: {}", queryChanged);
 
     // Convert to SQL
-    System.out.println("DEBUG: Converting rewritten query to SQL...");
+    LOG.debug("Converting rewritten query to SQL...");
     String rewrittenSql = convertToSql(rewrittenQuery);
 
-    System.out.println("DEBUG: Rewrite complete!");
-    System.out.println("@@@ QUERY REWRITER - END @@@\n");
+    LOG.debug("Rewrite complete!");
+    LOG.debug("@@@ QUERY REWRITER - END @@@");
 
     return new RewriteResult(rewrittenQuery, rewrittenSql, replacer.getReplacementCount());
   }
@@ -127,16 +123,18 @@ public class QueryRewriter {
       String nodeDigest = computeDigestForMatching(node);
 
       // Debug: Print what we're comparing
-      System.out.println("\n========================================");
-      System.out.println("DEBUG: Visiting node type: " + node.getClass().getSimpleName());
-      System.out.println("DEBUG: Node digest hash: " + nodeDigest.hashCode());
-      System.out.println("DEBUG: Node digest length: " + nodeDigest.length());
-      System.out.println("DEBUG: Full node digest:");
-      System.out.println(nodeDigest);
-      System.out.println("========================================");
+      LOG.debug("\n========================================");
+      LOG.debug("=== CHECKING NODE FOR MATCH ===");
+      LOG.debug("========================================");
+      LOG.debug("Node type: {}", node.getClass().getSimpleName());
+      LOG.debug("Node digest hash: {}", nodeDigest.hashCode());
+      LOG.debug("Node digest length: {}", nodeDigest.length());
+      LOG.debug("Full node digest:");
+      LOG.debug("{}", nodeDigest);
+      LOG.debug("========================================");
 
       // Check if this subtree matches any of our common subexpressions
-      System.out.println("\nDEBUG: Checking " + subexpressionMap.size() + " patterns...");
+      LOG.debug("\nChecking against {} pattern keys...", subexpressionMap.size());
 
       int patternIndex = 0;
       for (Map.Entry<String, CommonSubexpressionFinder.SubexpressionInfo> entry : subexpressionMap.entrySet()) {
@@ -144,24 +142,24 @@ public class QueryRewriter {
         CommonSubexpressionFinder.SubexpressionInfo subexprInfo = entry.getValue();
         String targetDigest = subexprInfo.getDigest();
 
-        System.out.println("\n--- Pattern " + patternIndex + " ---");
-        System.out.println("Pattern digest hash: " + targetDigest.hashCode());
-        System.out.println("Pattern digest length: " + targetDigest.length());
-        System.out.println("Pattern digest:");
-        System.out.println(targetDigest);
+        LOG.debug("--- Pattern {} ---", patternIndex);
+        LOG.debug("Pattern digest hash: {}", targetDigest.hashCode());
+        LOG.debug("Pattern digest length: {}", targetDigest.length());
+        LOG.debug("Pattern digest:");
+        LOG.debug("{}", targetDigest);
 
         // Compare using digest (proper structural comparison, not string matching)
         boolean matches = targetDigest.equals(nodeDigest);
-        System.out.println("Match result: " + matches);
+        LOG.debug("Match result: {}", matches);
 
         if (matches) {
-          System.out.println("\n*** MATCH FOUND! ***");
+          LOG.debug("*** MATCH FOUND! ***");
           // Found a match! Replace with MV scan (direct TableScan replacement)
           // HYBRID STRATEGY: Exact matching for aggregations, filter-agnostic for joins
           MaterializedViewGenerator.MaterializedViewInfo mvInfo = materializedViews.get(entry.getKey());
           if (mvInfo != null) {
             try {
-              System.out.println("DEBUG: Creating standard MV replacement for: " + mvInfo.getViewName());
+              LOG.debug("Creating standard MV replacement for: {}", mvInfo.getViewName());
 
               // CRITICAL FIX: Use the current node's cluster, not the representative node's cluster!
               // The representative node is from a different query plan (Stage 1), so its cluster
@@ -169,41 +167,59 @@ public class QueryRewriter {
               RelOptCluster cluster = node.getCluster();
               RelNode matchedSubtree = node; // Use current node, not representative
 
-              // Build standard replacement (direct TableScan, no residual filter for exact match)
-              RelNode replacement = buildStandardReplacement(matchedSubtree, mvInfo, cluster, null);
+              // CRITICAL: For aggregations-on-join with filter-agnostic matching,
+              // extract any filters from the query as residual filters
+              RexNode residualFilter = null;
+              if (mvInfo.isAggregationOnJoin()) {
+                residualFilter = extractFilterFromAggregationSubtree(matchedSubtree);
+                if (residualFilter != null) {
+                  LOG.debug("Extracted residual filter from aggregation-on-join: {}", residualFilter);
+
+                  // Validate that residual filter can be applied to MV schema
+                  // For aggregation-on-join, the MV output is the join (not the aggregation)
+                  // So we need to check against the join's schema
+                  if (!canApplyResidualFilterForAggOnJoin(residualFilter, mvInfo.getOriginalNode(), node)) {
+                    LOG.debug("Cannot apply residual filter - required columns not in MV output");
+                    LOG.debug("Skipping this MV match");
+                    continue; // Try next pattern
+                  }
+                }
+              }
+
+              // Build replacement with residual filter (if any)
+              RelNode replacement = buildStandardReplacement(matchedSubtree, mvInfo, cluster, residualFilter);
 
               replacementCount++;
-              System.out.println("\n*** REPLACEMENT SUCCESSFUL! ***");
-              System.out.println("DEBUG: Replaced with MV: " + mvInfo.getViewName());
-              System.out.println("DEBUG: Replacement count now: " + replacementCount);
-              System.out.println("========================================\n");
+              LOG.debug("*** REPLACEMENT SUCCESSFUL! ***");
+              LOG.debug("Replaced with MV: {}", mvInfo.getViewName());
+              LOG.debug("Replacement count now: {}", replacementCount);
+              LOG.debug("========================================");
 
               return replacement;
 
             } catch (Exception e) {
-              System.err.println("\n!!! ERROR: Failed to create MV replacement !!!");
-              System.err.println("Error message: " + e.getMessage());
-              e.printStackTrace();
+              LOG.error("Failed to create MV replacement", e);
+              LOG.error("Error message: {}", e.getMessage());
 
               // Fall back to original subtree
-              System.err.println("DEBUG: Falling back to original subtree");
+              LOG.debug("Falling back to original subtree");
               return subexprInfo.getRepresentativeNode();
             }
           } else {
-            System.err.println("WARNING: Match found but no MV info available!");
+            LOG.warn("Match found but no MV info available!");
           }
         }
       }
 
       // Try filter implication matching
-      System.out.println("\nDEBUG: No exact match found. Trying filter implication...");
+      LOG.debug("No exact match found. Trying filter implication...");
       RelNode filterMatch = tryFilterImplicationRewrite(node);
       if (filterMatch != null) {
         return filterMatch;
       }
 
-      System.out.println("\nDEBUG: No match found for this node");
-      System.out.println("========================================\n");
+      LOG.debug("No match found for this node");
+      LOG.debug("========================================");
 
       // No match found - return null to indicate no replacement
       return null;
@@ -217,11 +233,11 @@ public class QueryRewriter {
       // Extract query filter
       RexNode queryFilter = extractFilterFromNode(node);
       if (queryFilter == null) {
-        System.out.println("DEBUG: No filter found in query node, skipping filter implication");
+        LOG.debug("No filter found in query node, skipping filter implication");
         return null; // No filter to check
       }
 
-      System.out.println("DEBUG: Query has filter: " + queryFilter);
+      LOG.debug("Query has filter: {}", queryFilter);
 
       // Try matching against each registered pattern
       for (Map.Entry<String, CommonSubexpressionFinder.SubexpressionInfo> entry : subexpressionMap.entrySet()) {
@@ -244,8 +260,8 @@ public class QueryRewriter {
           continue; // MV has no filter
         }
 
-        System.out.println("DEBUG: Checking implication against MV: " + mvInfo.getViewName());
-        System.out.println("DEBUG: MV filter: " + mvFilter);
+        LOG.debug("Checking implication against MV: {}", mvInfo.getViewName());
+        LOG.debug("MV filter: {}", mvFilter);
 
         // Check if query filter implies MV filter
         RexBuilder rexBuilder = node.getCluster().getRexBuilder();
@@ -253,15 +269,15 @@ public class QueryRewriter {
             FilterImplicationChecker.checkImplication(queryFilter, mvFilter, rexBuilder);
 
         if (result.implies()) {
-          System.out.println("\n*** FILTER IMPLICATION MATCH FOUND! ***");
-          System.out.println("DEBUG: Query filter implies MV filter");
-          System.out.println("DEBUG: Residual filter: " + (result.getResidualFilter() != null ? result.getResidualFilter() : "none"));
+          LOG.debug("\n*** FILTER IMPLICATION MATCH FOUND! ***");
+          LOG.debug("Query filter implies MV filter");
+          LOG.debug("Residual filter: {}", (result.getResidualFilter() != null ? result.getResidualFilter() : "none"));
 
           // Validate that residual filter can be applied to MV schema
           if (result.getResidualFilter() != null) {
             if (!canApplyResidualFilter(result.getResidualFilter(), mvPattern, node)) {
-              System.out.println("DEBUG: Cannot apply residual filter - required columns not in MV output");
-              System.out.println("DEBUG: Skipping filter implication for this MV");
+              LOG.debug("Cannot apply residual filter - required columns not in MV output");
+              LOG.debug("Skipping filter implication for this MV");
               continue; // Try next MV
             }
           }
@@ -271,20 +287,107 @@ public class QueryRewriter {
             RelNode replacement = buildStandardReplacement(node, mvInfo, cluster, result.getResidualFilter());
 
             replacementCount++;
-            System.out.println("DEBUG: Replaced with MV (filter implication): " + mvInfo.getViewName());
-            System.out.println("DEBUG: Replacement count now: " + replacementCount);
-            System.out.println("========================================\n");
+            LOG.debug("Replaced with MV (filter implication): {}", mvInfo.getViewName());
+            LOG.debug("Replacement count now: {}", replacementCount);
+            LOG.debug("========================================\n");
 
             return replacement;
 
           } catch (Exception e) {
-            System.err.println("ERROR: Failed to create MV replacement with filter implication");
-            e.printStackTrace();
+            LOG.error("Failed to create MV replacement with filter implication", e);
           }
         }
       }
 
       return null; // No filter implication match found
+    }
+
+    /**
+     * Check if a residual filter can be applied to an aggregation-on-join MV.
+     * For aggregation-on-join MVs, the MV materializes the JOIN (not the aggregation),
+     * so ALL columns from the join are available for filtering.
+     *
+     * @param residualFilter The filter to apply
+     * @param mvPattern The MV's original RelNode pattern (Aggregate node)
+     * @param queryNode The query node (for column name mapping)
+     * @return true if the filter can be applied, false otherwise
+     */
+    private boolean canApplyResidualFilterForAggOnJoin(RexNode residualFilter, RelNode mvPattern, RelNode queryNode) {
+      if (residualFilter == null) {
+        return true; // No filter to apply
+      }
+
+      // Extract the join node from the aggregation pattern
+      RelNode joinNode = extractJoinFromAggregation(mvPattern);
+      if (joinNode == null) {
+        LOG.debug("Cannot extract join from aggregation pattern, allowing filter application");
+        return true; // Conservative: allow if we can't determine
+      }
+
+      // Get the output schema of the JOIN (this is what the MV actually contains)
+      RelDataType mvOutputType = joinNode.getRowType();
+      List<String> mvColumns = mvOutputType.getFieldNames();
+
+      LOG.debug("MV output columns (from join): {}", mvColumns);
+
+      // Get the query's input schema (before filtering/aggregation)
+      RelDataType queryInputType = getInputType(queryNode);
+      if (queryInputType == null) {
+        LOG.debug("Cannot determine query input type, allowing filter application");
+        return true; // Conservative: allow if we can't determine
+      }
+
+      List<String> queryColumns = queryInputType.getFieldNames();
+
+      // Extract field references from the residual filter
+      java.util.Set<Integer> referencedFields = new java.util.HashSet<>();
+      extractFieldReferences(residualFilter, referencedFields);
+
+      // Check if all referenced fields exist in MV output
+      for (Integer fieldIndex : referencedFields) {
+        if (fieldIndex >= queryColumns.size()) {
+          LOG.debug("Field index {} out of bounds", fieldIndex);
+          return false;
+        }
+
+        String fieldName = queryColumns.get(fieldIndex);
+        if (!mvColumns.contains(fieldName)) {
+          LOG.debug("Field '{}' (index {}) not in MV output: {}", fieldName, fieldIndex, mvColumns);
+          return false;
+        }
+      }
+
+      LOG.debug("All residual filter fields available in MV output");
+      return true;
+    }
+
+    /**
+     * Extract the join node from an aggregation pattern.
+     * Aggregation-on-join structure: Aggregate -> [Filter ->] [Project ->] Join
+     */
+    private RelNode extractJoinFromAggregation(RelNode node) {
+      if (node instanceof Aggregate) {
+        RelNode input = ((Aggregate) node).getInput();
+        return extractJoinFromTree(input);
+      }
+      return null;
+    }
+
+    /**
+     * Recursively search for join node in tree, skipping Filter and Project nodes.
+     */
+    private RelNode extractJoinFromTree(RelNode node) {
+      if (node instanceof org.apache.calcite.rel.core.Join) {
+        return node;
+      }
+      if (node instanceof org.apache.calcite.rel.core.Filter) {
+        return extractJoinFromTree(node.getInput(0));
+      }
+      if (node instanceof org.apache.calcite.rel.core.Project) {
+        return extractJoinFromTree(node.getInput(0));
+      }
+      // Not found
+      return null;
     }
 
     /**
@@ -311,7 +414,7 @@ public class QueryRewriter {
       // Get the query's input schema (before filtering/aggregation)
       RelDataType queryInputType = getInputType(queryNode);
       if (queryInputType == null) {
-        System.out.println("DEBUG: Cannot determine query input type, allowing filter application");
+        LOG.debug("Cannot determine query input type, allowing filter application");
         return true; // Conservative: allow if we can't determine
       }
 
@@ -324,18 +427,18 @@ public class QueryRewriter {
       // Check if all referenced fields exist in MV output
       for (Integer fieldIndex : referencedFields) {
         if (fieldIndex >= queryColumns.size()) {
-          System.out.println("DEBUG: Field index " + fieldIndex + " out of bounds");
+          LOG.debug("Field index {} out of bounds", fieldIndex);
           return false;
         }
 
         String fieldName = queryColumns.get(fieldIndex);
         if (!mvColumns.contains(fieldName)) {
-          System.out.println("DEBUG: Field '" + fieldName + "' (index " + fieldIndex + ") not in MV output: " + mvColumns);
+          LOG.debug("Field '{}' (index {}) not in MV output: {}", fieldName, fieldIndex, mvColumns);
           return false;
         }
       }
 
-      System.out.println("DEBUG: All residual filter fields available in MV output");
+      LOG.debug("All residual filter fields available in MV output");
       return true;
     }
 
@@ -376,6 +479,14 @@ public class QueryRewriter {
      * Extract filter RexNode from a RelNode.
      * Handles LogicalFilter and LogicalAggregate (with filter as input).
      */
+    /**
+     * Extract filter from aggregation subtree for aggregation-on-join patterns.
+     * This looks for Filter nodes in the aggregation's input tree.
+     */
+    private RexNode extractFilterFromAggregationSubtree(RelNode node) {
+      return extractFilterFromNode(node);
+    }
+
     private RexNode extractFilterFromNode(RelNode node) {
       if (node instanceof LogicalFilter) {
         return ((LogicalFilter) node).getCondition();
@@ -478,8 +589,73 @@ public class QueryRewriter {
       // Strip Sort (ORDER BY, LIMIT) nodes - they don't affect aggregation results
       RelNode coreNode = stripSort(node);
 
-      // Use exact matching for everything else (includes filters, joins, aggregations)
+      // Check if this is an aggregation pattern
+      boolean isAggregation = (coreNode instanceof Aggregate) ||
+                              (coreNode instanceof org.apache.calcite.rel.core.Filter && hasAggregateBelow(coreNode)) ||
+                              (coreNode instanceof org.apache.calcite.rel.core.Project && hasAggregateBelow(coreNode));
+
+      if (isAggregation) {
+        // Use filter-agnostic matching for aggregations on joins
+        return computeAggregationCoreDigest(coreNode);
+      }
+
+      // Use exact matching for everything else (includes filters, joins, non-aggregation patterns)
       return RelOptUtil.toString(coreNode);
+    }
+
+    /**
+     * Compute digest for aggregation patterns.
+     * MUST MATCH the logic in CommonSubexpressionFinder.computeAggregationCoreDigest()!
+     *
+     * HYBRID STRATEGY:
+     * - For aggregations on joins: Use filter-agnostic matching (excludes WHERE clauses)
+     * - For single-table aggregations: Use exact matching (includes WHERE clauses)
+     */
+    private String computeAggregationCoreDigest(RelNode node) {
+      if (!(node instanceof Aggregate)) {
+        return RelOptUtil.toString(node);
+      }
+
+      Aggregate agg = (Aggregate) node;
+
+      // HYBRID STRATEGY: Check if this aggregation has joins underneath
+      boolean hasJoins = hasJoinBelow(agg);
+
+      if (hasJoins) {
+        // CASE 1: Aggregation on JOIN → Filter-agnostic matching
+        // Build core digest: Aggregate structure + input without filters
+        // This allows queries with different WHERE clauses to share the same MV!
+        LOG.debug("      [QueryRewriter] Aggregation on JOIN detected → Filter-agnostic matching");
+
+        StringBuilder coreDigest = new StringBuilder();
+        coreDigest.append("AggregationCore[");
+        coreDigest.append("groupSet=").append(agg.getGroupSet()).append(", ");
+        coreDigest.append("aggCalls=").append(agg.getAggCallList()).append(", ");
+        coreDigest.append("input=").append(computeInputDigestWithoutFilters(agg.getInput()));
+        coreDigest.append("]");
+
+        return coreDigest.toString();
+      } else {
+        // CASE 2: Single-table aggregation → Exact matching
+        // Use full digest including filters for safety
+        LOG.debug("      [QueryRewriter] Single-table aggregation detected → Exact matching");
+        return RelOptUtil.toString(node);
+      }
+    }
+
+    /**
+     * Check if a node has aggregates in its subtree.
+     */
+    private boolean hasAggregateBelow(RelNode node) {
+      for (RelNode input : node.getInputs()) {
+        if (input instanceof Aggregate) {
+          return true;
+        }
+        if (hasAggregateBelow(input)) {
+          return true;
+        }
+      }
+      return false;
     }
 
     /**
@@ -582,17 +758,100 @@ public class QueryRewriter {
     }
 
     /**
-     * Build STANDARD MV replacement: Direct TableScan.
+     * Build STANDARD MV replacement: Direct TableScan or Aggregate on TableScan.
      *
-     * Used for non-enhanced MVs or join patterns.
-     * Simply replaces the matched subtree with a scan of the MV table.
+     * HYBRID STRATEGY:
+     * - Aggregation on Join: MV contains only the join → Preserve Aggregate on top
+     * - Single-table Aggregation: MV contains full aggregation → Direct scan
+     * - Join patterns: MV contains join → Direct scan
      */
     private RelNode buildStandardReplacement(RelNode matchedSubtree,
         MaterializedViewGenerator.MaterializedViewInfo mvInfo, RelOptCluster cluster, RexNode residualFilter) {
-      System.out.println("  Building standard TableScan replacement");
+      LOG.debug("  Building standard TableScan replacement");
       if (residualFilter != null) {
-        System.out.println("  With residual filter: " + residualFilter);
+        LOG.debug("  With residual filter: {}", residualFilter);
       }
+
+      boolean isAggregationOnJoin = mvInfo.isAggregationOnJoin();
+      LOG.debug("  Is aggregation on join pattern: {}", isAggregationOnJoin);
+
+      if (isAggregationOnJoin) {
+        // CRITICAL FIX: For aggregation-on-join patterns, MV contains only the join
+        // We need to preserve the Aggregate node on top of the MV scan
+        return buildAggregationOnJoinReplacement(matchedSubtree, mvInfo, cluster, residualFilter);
+      } else {
+        // Standard replacement: MV contains the full pattern
+        return buildDirectMvScan(matchedSubtree, mvInfo, cluster, residualFilter);
+      }
+    }
+
+    /**
+     * Build replacement for aggregation-on-join patterns.
+     * MV contains only the join, so we preserve the Aggregate node on top.
+     */
+    private RelNode buildAggregationOnJoinReplacement(RelNode matchedSubtree,
+        MaterializedViewGenerator.MaterializedViewInfo mvInfo, RelOptCluster cluster, RexNode residualFilter) {
+      LOG.debug("  Building aggregation-on-join replacement");
+
+      // Extract the Aggregate node from the matched pattern
+      Aggregate agg = extractAggregateNode(matchedSubtree);
+      if (agg == null) {
+        LOG.warn("  Could not extract Aggregate node, falling back to direct scan");
+        return buildDirectMvScan(matchedSubtree, mvInfo, cluster, residualFilter);
+      }
+
+      LOG.debug("  Extracted Aggregate: groupSet={}, aggCalls={}", agg.getGroupSet(), agg.getAggCallList());
+
+      // Get the join input (what the MV actually contains)
+      RelNode joinInput = extractJoinInput(agg);
+      RelDataType joinRowType = joinInput.getRowType();
+
+      // Create MV scan with the join's row type (not the aggregate's row type)
+      String mvName = mvInfo.getViewName();
+      List<String> qualifiedName = Arrays.asList("hive", "default", mvName);
+
+      Table syntheticMvTable = new AbstractTable() {
+        @Override
+        public RelDataType getRowType(RelDataTypeFactory typeFactory) {
+          return joinRowType;
+        }
+      };
+
+      RelOptTable mvTable = new SyntheticMvTable(qualifiedName, joinRowType, syntheticMvTable);
+      RelNode mvScan = LogicalTableScan.create(cluster, mvTable);
+
+      LOG.debug("  Created MV scan with {} columns", joinRowType.getFieldCount());
+
+      // Apply residual filter on the MV scan (BEFORE aggregation)
+      if (residualFilter != null) {
+        LOG.debug("  Applying residual filter before aggregation");
+        // For aggregation-on-join, residual filter is on raw columns (before GROUP BY)
+        // No field remapping needed - filter is already on the right schema
+        mvScan = LogicalFilter.create(mvScan, residualFilter);
+      }
+
+      // Recreate the Aggregate node on top of the MV scan
+      // Note: Using overload without hints for Calcite compatibility
+      RelNode result = LogicalAggregate.create(
+          mvScan,
+          agg.getGroupSet(),
+          agg.getGroupSets(),
+          agg.getAggCallList()
+      );
+
+      LOG.debug("  Recreated Aggregate on top of MV scan");
+      LOG.debug("  Final result: Aggregate(GROUP BY {}) → TableScan({})", agg.getGroupSet(), mvName);
+
+      return result;
+    }
+
+    /**
+     * Build direct MV scan replacement (standard case).
+     * MV contains the full pattern, so we just scan it directly.
+     */
+    private RelNode buildDirectMvScan(RelNode matchedSubtree,
+        MaterializedViewGenerator.MaterializedViewInfo mvInfo, RelOptCluster cluster, RexNode residualFilter) {
+      LOG.debug("  Building direct MV scan");
 
       // Get expected column names from the query
       RelDataType queryRowType = matchedSubtree.getRowType();
@@ -612,17 +871,17 @@ public class QueryRewriter {
 
       // Apply residual filter if present (with field remapping)
       if (residualFilter != null) {
-        System.out.println("  Applying residual filter on top of MV scan");
+        LOG.debug("  Applying residual filter on top of MV scan");
 
         // Remap field indices from query schema to MV output schema
         RelNode mvPattern = mvInfo.getOriginalNode();
         RexNode remappedFilter = remapFilterFields(residualFilter, matchedSubtree, mvPattern, cluster);
 
         if (remappedFilter != null) {
-          System.out.println("  Remapped filter: " + remappedFilter);
+          LOG.debug("  Remapped filter: {}", remappedFilter);
           mvScan = LogicalFilter.create(mvScan, remappedFilter);
         } else {
-          System.out.println("  WARNING: Could not remap filter, skipping");
+          LOG.warn("  Could not remap filter, skipping");
         }
       }
 
@@ -631,12 +890,50 @@ public class QueryRewriter {
 
       // Check if column names differ (different aliases)
       if (!columnNamesMatch(queryRowType, mvRowType)) {
-        System.out.println("  Column names differ - adding projection layer for alias remapping");
+        LOG.debug("  Column names differ - adding projection layer for alias remapping");
         return buildProjectionWithAliases(mvScan, queryRowType, cluster);
       }
 
-      System.out.println("  Standard replacement complete: SELECT * FROM " + String.join(".", qualifiedName));
+      LOG.debug("  Standard replacement complete: SELECT * FROM {}", String.join(".", qualifiedName));
       return mvScan;
+    }
+
+    /**
+     * Extract the Aggregate node from a pattern (may be wrapped by Filter/Project/Sort).
+     */
+    private Aggregate extractAggregateNode(RelNode node) {
+      if (node instanceof Aggregate) {
+        return (Aggregate) node;
+      }
+      // Check through wrappers
+      if (node instanceof LogicalFilter || node instanceof LogicalProject || node instanceof org.apache.calcite.rel.core.Sort) {
+        for (RelNode child : node.getInputs()) {
+          if (child instanceof Aggregate) {
+            return (Aggregate) child;
+          }
+          // Recursively check one more level
+          Aggregate agg = extractAggregateNode(child);
+          if (agg != null) {
+            return agg;
+          }
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Extract the join input from an Aggregate node.
+     * Skips Filter/Project nodes between Aggregate and Join.
+     */
+    private RelNode extractJoinInput(Aggregate agg) {
+      RelNode input = agg.getInput();
+
+      // Skip through Filter and Project nodes to get to the join
+      while (input instanceof LogicalFilter || input instanceof LogicalProject) {
+        input = input.getInput(0);
+      }
+
+      return input;
     }
 
     /**
@@ -659,15 +956,15 @@ public class QueryRewriter {
       RelDataType mvOutputType = mvPattern.getRowType();
 
       if (queryInputType == null || mvOutputType == null) {
-        System.out.println("  ERROR: Cannot determine schemas for field remapping");
+        LOG.error("  Cannot determine schemas for field remapping");
         return null;
       }
 
       List<String> queryInputFields = queryInputType.getFieldNames();
       List<String> mvOutputFields = mvOutputType.getFieldNames();
 
-      System.out.println("  Query input fields: " + queryInputFields);
-      System.out.println("  MV output fields: " + mvOutputFields);
+      LOG.debug("  Query input fields: {}", queryInputFields);
+      LOG.debug("  MV output fields: {}", mvOutputFields);
 
       // Build mapping: query input index -> MV output index
       java.util.Map<Integer, Integer> indexMap = new java.util.HashMap<>();
@@ -676,7 +973,7 @@ public class QueryRewriter {
         int mvIdx = mvOutputFields.indexOf(fieldName);
         if (mvIdx >= 0) {
           indexMap.put(queryIdx, mvIdx);
-          System.out.println("  Mapping: $" + queryIdx + " (" + fieldName + ") -> $" + mvIdx);
+          LOG.debug("  Mapping: ${} ({}) -> ${}", queryIdx, fieldName, mvIdx);
         }
       }
 
@@ -695,10 +992,10 @@ public class QueryRewriter {
 
         if (indexMap.containsKey(oldIndex)) {
           int newIndex = indexMap.get(oldIndex);
-          System.out.println("    Remapping field reference: $" + oldIndex + " -> $" + newIndex);
+          LOG.debug("    Remapping field reference: ${} -> ${}", oldIndex, newIndex);
           return rexBuilder.makeInputRef(inputRef.getType(), newIndex);
         } else {
-          System.out.println("    WARNING: Field $" + oldIndex + " not found in MV output");
+          LOG.warn("    Field ${} not found in MV output", oldIndex);
           return null;
         }
       } else if (node instanceof org.apache.calcite.rex.RexCall) {
@@ -754,7 +1051,7 @@ public class QueryRewriter {
      * Both can use same MV, but we add projection to rename columns in output.
      */
     private RelNode buildProjectionWithAliases(RelNode mvScan, RelDataType targetRowType, RelOptCluster cluster) {
-      System.out.println("  Adding projection layer to remap column aliases");
+      LOG.debug("  Adding projection layer to remap column aliases");
 
       RexBuilder rexBuilder = cluster.getRexBuilder();
       List<RexNode> projects = new ArrayList<>();
@@ -765,8 +1062,8 @@ public class QueryRewriter {
         projects.add(rexBuilder.makeInputRef(mvScan, i));
         fieldNames.add(targetRowType.getFieldNames().get(i));
 
-        System.out.println("    Remapping column " + i + ": " + mvScan.getRowType().getFieldNames().get(i) + " -> "
-            + targetRowType.getFieldNames().get(i));
+        LOG.debug("    Remapping column {}: {} -> {}", i, mvScan.getRowType().getFieldNames().get(i),
+            targetRowType.getFieldNames().get(i));
       }
 
       return LogicalProject.create(mvScan, projects, fieldNames);
@@ -778,45 +1075,44 @@ public class QueryRewriter {
    * Convert a RelNode to SQL.
    */
   private String convertToSql(RelNode relNode) {
-    System.out.println("\n+++ CONVERTING RELNODE TO SQL +++");
-    System.out.println("DEBUG: RelNode type: " + relNode.getClass().getSimpleName());
-    System.out.println("DEBUG: RelNode digest preview:");
+    LOG.debug("\n+++ CONVERTING RELNODE TO SQL +++");
+    LOG.debug("RelNode type: {}", relNode.getClass().getSimpleName());
+    LOG.debug("RelNode digest preview:");
     String digest = RelOptUtil.toString(relNode);
-    System.out.println(digest.substring(0, Math.min(500, digest.length())));
+    LOG.debug("{}", digest.substring(0, Math.min(500, digest.length())));
 
     try {
-      System.out.println("DEBUG: Creating SQL dialect (HIVE)...");
+      LOG.debug("Creating SQL dialect (HIVE)...");
       SqlDialect dialect = SqlDialect.DatabaseProduct.HIVE.getDialect();
-      System.out.println("DEBUG: Dialect: " + dialect.getClass().getSimpleName());
+      LOG.debug("Dialect: {}", dialect.getClass().getSimpleName());
 
-      System.out.println("DEBUG: Creating RelToSqlConverter...");
+      LOG.debug("Creating RelToSqlConverter...");
       RelToSqlConverter converter = new RelToSqlConverter(dialect);
 
-      System.out.println("DEBUG: Converting RelNode to SqlNode...");
+      LOG.debug("Converting RelNode to SqlNode...");
       SqlNode sqlNode = converter.visitChild(0, relNode).asStatement();
-      System.out.println("DEBUG: SqlNode created: " + sqlNode.getClass().getSimpleName());
+      LOG.debug("SqlNode created: {}", sqlNode.getClass().getSimpleName());
 
-      System.out.println("DEBUG: Converting SqlNode to SQL string...");
+      LOG.debug("Converting SqlNode to SQL string...");
       String sql = sqlNode.toSqlString(dialect).getSql();
 
-      System.out.println("DEBUG: SQL conversion successful!");
-      System.out.println("DEBUG: Generated SQL:");
-      System.out.println(sql);
-      System.out.println("+++++++++++++++++++++++++++++++++\n");
+      LOG.debug("SQL conversion successful!");
+      LOG.debug("Generated SQL:");
+      LOG.debug("{}", sql);
+      LOG.debug("+++++++++++++++++++++++++++++++++\n");
 
       return sql;
     } catch (Exception e) {
-      System.err.println("\n!!! ERROR in SQL conversion !!!");
-      System.err.println("Error message: " + e.getMessage());
-      System.err.println("Error class: " + e.getClass().getName());
-      System.err.println("Stack trace:");
-      e.printStackTrace();
+      LOG.error("\n!!! ERROR in SQL conversion !!!");
+      LOG.error("Error message: {}", e.getMessage());
+      LOG.error("Error class: {}", e.getClass().getName());
+      LOG.error("Stack trace:", e);
 
       // Fallback to explain string
       String fallback = "-- Rewritten query (RelNode):\n-- " + RelOptUtil.toString(relNode);
-      System.err.println("DEBUG: Using fallback explain string");
-      System.err.println(fallback);
-      System.err.println("+++++++++++++++++++++++++++++++++\n");
+      LOG.debug("Using fallback explain string");
+      LOG.debug("{}", fallback);
+      LOG.debug("+++++++++++++++++++++++++++++++++\n");
       return fallback;
     }
   }
@@ -866,74 +1162,74 @@ public class QueryRewriter {
       this.qualifiedName = qualifiedName;
       this.rowType = rowType;
       this.table = table;
-      System.out.println("DEBUG: SyntheticMvTable constructor called for: " + qualifiedName);
+      LOG.debug("SyntheticMvTable constructor called for: {}", qualifiedName);
     }
 
     @Override
     public List<String> getQualifiedName() {
-      System.out.println("DEBUG: SyntheticMvTable.getQualifiedName() -> " + qualifiedName);
+      LOG.debug("SyntheticMvTable.getQualifiedName() -> {}", qualifiedName);
       return qualifiedName;
     }
 
     @Override
     public double getRowCount() {
-      System.out.println("DEBUG: SyntheticMvTable.getRowCount() -> 100.0");
+      LOG.debug("SyntheticMvTable.getRowCount() -> 100.0");
       return 100.0; // Synthetic estimate
     }
 
     @Override
     public RelDataType getRowType() {
-      System.out.println("DEBUG: SyntheticMvTable.getRowType() -> " + rowType);
+      LOG.debug("SyntheticMvTable.getRowType() -> {}", rowType);
       return rowType;
     }
 
     @Override
     public RelOptSchema getRelOptSchema() {
-      System.out.println("DEBUG: SyntheticMvTable.getRelOptSchema() -> null");
+      LOG.debug("SyntheticMvTable.getRelOptSchema() -> null");
       return null;
     }
 
     @Override
     public RelNode toRel(ToRelContext context) {
-      System.out.println("DEBUG: SyntheticMvTable.toRel() called");
+      LOG.debug("SyntheticMvTable.toRel() called");
       RelNode result = LogicalTableScan.create(context.getCluster(), this);
-      System.out.println("DEBUG: SyntheticMvTable.toRel() -> " + result.getClass().getSimpleName());
+      LOG.debug("SyntheticMvTable.toRel() -> {}", result.getClass().getSimpleName());
       return result;
     }
 
     @Override
     public List<RelCollation> getCollationList() {
-      System.out.println("DEBUG: SyntheticMvTable.getCollationList() -> empty");
+      LOG.debug("SyntheticMvTable.getCollationList() -> empty");
       return Collections.emptyList();
     }
 
     @Override
     public RelDistribution getDistribution() {
-      System.out.println("DEBUG: SyntheticMvTable.getDistribution() -> BROADCAST_DISTRIBUTED");
+      LOG.debug("SyntheticMvTable.getDistribution() -> BROADCAST_DISTRIBUTED");
       return RelDistributions.BROADCAST_DISTRIBUTED;
     }
 
     @Override
     public boolean isKey(org.apache.calcite.util.ImmutableBitSet columns) {
-      System.out.println("DEBUG: SyntheticMvTable.isKey() -> false");
+      LOG.debug("SyntheticMvTable.isKey() -> false");
       return false;
     }
 
     @Override
     public List<RelReferentialConstraint> getReferentialConstraints() {
-      System.out.println("DEBUG: SyntheticMvTable.getReferentialConstraints() -> empty");
+      LOG.debug("SyntheticMvTable.getReferentialConstraints() -> empty");
       return Collections.emptyList();
     }
 
     @Override
     public org.apache.calcite.linq4j.tree.Expression getExpression(Class clazz) {
-      System.out.println("DEBUG: SyntheticMvTable.getExpression() called - throwing UnsupportedOperationException");
+      LOG.debug("SyntheticMvTable.getExpression() called - throwing UnsupportedOperationException");
       throw new UnsupportedOperationException("getExpression not supported for synthetic MV tables");
     }
 
     @Override
     public RelOptTable extend(List<RelDataTypeField> extendedFields) {
-      System.out.println("DEBUG: SyntheticMvTable.extend() called - throwing UnsupportedOperationException");
+      LOG.debug("SyntheticMvTable.extend() called - throwing UnsupportedOperationException");
       throw new UnsupportedOperationException("extend not supported for synthetic MV tables");
     }
 
@@ -944,12 +1240,12 @@ public class QueryRewriter {
 
     @Override
     public <T> T unwrap(Class<T> clazz) {
-      System.out.println("DEBUG: SyntheticMvTable.unwrap() called for class: " + clazz.getName());
+      LOG.debug("SyntheticMvTable.unwrap() called for class: {}", clazz.getName());
       if (clazz.isInstance(table)) {
-        System.out.println("DEBUG: SyntheticMvTable.unwrap() -> returning wrapped table");
+        LOG.debug("SyntheticMvTable.unwrap() -> returning wrapped table");
         return clazz.cast(table);
       }
-      System.out.println("DEBUG: SyntheticMvTable.unwrap() -> returning null");
+      LOG.debug("SyntheticMvTable.unwrap() -> returning null");
       return null;
     }
 

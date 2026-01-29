@@ -18,12 +18,16 @@ import org.apache.hadoop.hive.ql.Driver;
 import org.apache.hadoop.hive.ql.metadata.Hive;
 import org.apache.hadoop.hive.ql.metadata.HiveException;
 import org.apache.hadoop.hive.ql.session.SessionState;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.linkedin.coral.common.HiveMetastoreClient;
 import com.linkedin.coral.common.HiveMscAdapter;
 
 
 public class TestUtils {
+
+  private static final Logger LOG = LoggerFactory.getLogger(TestUtils.class);
 
   public static final String CORAL_MV_TEST_DIR = "coral.mv.test.dir";
 
@@ -40,18 +44,18 @@ public class TestUtils {
 
   public static HiveMetastoreClient setupTestMetastore(HiveConf conf) throws HiveException, MetaException, IOException {
     String testDir = conf.get(CORAL_MV_TEST_DIR);
-    System.out.println("Test Workspace: " + testDir);
+    LOG.debug("Test Workspace: {}", testDir);
 
     // Clean up any existing test directory
     File testDirFile = new File(testDir);
     if (testDirFile.exists()) {
-      System.out.println("Cleaning up existing test directory...");
+      LOG.debug("Cleaning up existing test directory...");
       try {
         FileUtils.deleteDirectory(testDirFile);
         // Wait a bit for filesystem to release locks (especially on Windows/Derby)
         Thread.sleep(100);
       } catch (Exception e) {
-        System.err.println("Warning: Could not fully clean test directory: " + e.getMessage());
+        LOG.warn("Could not fully clean test directory: {}", e.getMessage());
         // Try to continue anyway
       }
     }
@@ -59,18 +63,18 @@ public class TestUtils {
     // Ensure parent directories exist
     testDirFile.mkdirs();
 
-    System.out.println("Starting Hive session...");
+    LOG.debug("Starting Hive session...");
     SessionState.start(conf);
     Driver driver = new Driver(conf);
 
     // Create test database and tables for materialized view optimization tests
-    System.out.println("Creating test tables...");
+    LOG.debug("Creating test tables...");
     run(driver, "CREATE DATABASE IF NOT EXISTS default");
     run(driver, "USE default");
     run(driver, "CREATE TABLE IF NOT EXISTS default.tableOne(a int, b varchar(30), c double)");
     run(driver, "CREATE TABLE IF NOT EXISTS default.tableTwo(x int, y double)");
     run(driver, "CREATE TABLE IF NOT EXISTS default.tableThree(id int, value varchar(50))");
-    System.out.println("Test tables created successfully");
+    LOG.debug("Test tables created successfully");
 
     HiveMetastoreClient mscAdapter = new HiveMscAdapter(Hive.get(conf).getMSC());
     return mscAdapter;
@@ -85,10 +89,10 @@ public class TestUtils {
     hiveConf.set(CORAL_MV_TEST_DIR, testDir);
 
     if (hiveConfStream != null) {
-      System.out.println("Loading hive.xml configuration from resources");
+      LOG.debug("Loading hive.xml configuration from resources");
       hiveConf.addResource(hiveConfStream);
     } else {
-      System.err.println("WARNING: hive.xml not found in classpath, using default configuration");
+      LOG.warn("hive.xml not found in classpath, using default configuration");
       // Manually configure essential properties if hive.xml is not found
       hiveConf.set("hive.exec.scratchdir", testDir + "/hive-scratch-dir");
       hiveConf.set("hive.metastore.warehouse.dir", testDir + "/warehouse");
@@ -103,7 +107,7 @@ public class TestUtils {
     hiveConf.set("_hive.hdfs.session.path", "/tmp/coral");
     hiveConf.set("_hive.local.session.path", "/tmp/coral");
 
-    System.out.println("HiveConf loaded with test directory: " + testDir);
+    LOG.debug("HiveConf loaded with test directory: {}", testDir);
     return hiveConf;
   }
 }
